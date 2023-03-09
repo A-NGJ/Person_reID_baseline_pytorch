@@ -1,6 +1,5 @@
 import argparse
 from collections import defaultdict
-from dataclasses import dataclass
 
 import json
 import os
@@ -17,10 +16,16 @@ from typing import (
 import cv2
 
 
-@dataclass
 class Annotation:
-    bbox: Tuple[int, int, int, int]
-    id: int
+    _id_count = 0
+
+    @classmethod
+    def update_count(cls):
+        cls._id_count += 1
+
+    def __init__(self, bbox: Tuple[int, int, int, int], id_: int):
+        self.bbox = bbox
+        self.id_ = id_ + Annotation._id_count
 
 
 class Camera:
@@ -47,6 +52,7 @@ class Camera:
         if location not in Camera._scene_mapping:
             Camera._scene_mapping[location] = Camera._scene_count
             Camera._scene_count += 1
+            Annotation.update_count()
 
     def __str__(self) -> str:
         return str(self.__dict__)
@@ -285,12 +291,14 @@ if __name__ == "__main__":
 
     # parse label studio data
     bbox_annotations = [labelstudio2bbox(x) for x in new_annotations]
-    
+
     exported_path = dest_path / "exported"
 
+    # crop bounding boxes from source images
     for bbox_annot in bbox_annotations:
         cropped = bbox_annot.crop_bbox()
         for crop in cropped:
             crop.export_to_reid(exported_path)
 
+    # generate data structure required for testing reID
     prepare_test_set(exported_path, dest_path)
