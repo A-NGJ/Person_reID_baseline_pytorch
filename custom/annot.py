@@ -1,6 +1,8 @@
 import argparse
 from collections import defaultdict
 
+import logging
+
 import json
 import os
 from pathlib import Path
@@ -16,16 +18,23 @@ from typing import (
 import cv2
 
 
+logging.basicConfig(level=logging.INFO)
+
+
 class Annotation:
-    _id_count = 0
+    _used_ids = set()
+    _start_id = 0
 
     @classmethod
-    def update_count(cls):
-        cls._id_count += 1
+    def update_start_id(cls):
+        cls._start_id += len(cls._used_ids)
 
-    def __init__(self, bbox: Tuple[int, int, int, int], id_: int):
+    def __init__(self, bbox: Tuple[int, int, int, int], id_: int, copy_id=False):
+        Annotation._used_ids.add(id_)
         self.bbox = bbox
-        self.id_ = id_ + Annotation._id_count
+        self.id_ = id_
+        if not copy_id:
+            self.id_ += Annotation._start_id
 
 
 class Camera:
@@ -52,7 +61,7 @@ class Camera:
         if location not in Camera._scene_mapping:
             Camera._scene_mapping[location] = Camera._scene_count
             Camera._scene_count += 1
-            Annotation.update_count()
+            Annotation.update_start_id()
 
     def __str__(self) -> str:
         return str(self.__dict__)
@@ -97,7 +106,11 @@ class Camera:
                     n=self.n,
                     sequence_n=self.sequence_n,
                     annotations=[
-                        Annotation((x, y, annot.bbox[2], annot.bbox[3]), annot.id)
+                        Annotation(
+                            (x, y, annot.bbox[2], annot.bbox[3]),
+                            annot.id_,
+                            copy_id=True,
+                        )
                     ],
                 )
             )
@@ -119,7 +132,7 @@ class Camera:
         filename_template = "{:0>4d}_c{:d}s{:d}_{:0>4d}.jpg"
         for annot in self.annotations:
             filename = filename_template.format(
-                annot.id,
+                annot.id_,
                 self.n,
                 Camera._scene_mapping[self.location],
                 self.sequence_n,
@@ -161,6 +174,11 @@ def labelstudio2bbox(annot: dict) -> Camera:
     for p in annot.get("Person", []):
         org_width = p["original_width"]
         org_height = p["original_height"]
+        labels = p.get("rectanglelabels")
+        if labels is None:
+            logging.warning("missing labels for %s", annot["image"])
+            continue
+
         annotation = Annotation(
             (
                 int(p["x"] / 100 * org_width),
@@ -168,7 +186,7 @@ def labelstudio2bbox(annot: dict) -> Camera:
                 int(p["width"] / 100 * org_width),
                 int(p["height"] / 100 * org_height),
             ),
-            int(p["rectanglelabels"][0].split()[1]),
+            int(labels[0].split()[1]),
         )
         camera.annotations.append(annotation)
 
