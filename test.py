@@ -146,6 +146,15 @@ else:
     image_datasets = {x: datasets.ImageFolder( os.path.join(data_dir,x) ,data_transforms) for x in ['gallery','query']}
     dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=opt.batchsize,
                                              shuffle=False, num_workers=16) for x in ['gallery','query']}
+    
+    # For debugging
+    # =============
+    # import json
+
+    # with open("custom/filenames.json", "w") as rfile:
+    #     json.dump({i: img[0] for i, img in enumerate(image_datasets["gallery"].imgs)}, rfile, indent=4)
+    # raise Exception
+    # ===============
 class_names = image_datasets['query'].classes
 use_gpu = torch.cuda.is_available()
 

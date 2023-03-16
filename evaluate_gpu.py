@@ -4,9 +4,18 @@ import numpy as np
 #import time
 import os
 
+import json
+import shutil
+
 #######################################################################
 # Evaluate
-def evaluate(qf,ql,qc,gf,gl,gc):
+def evaluate(qf,ql,qc,gf,gl,gc, filenames):
+    # ==== DEBUG ====
+    debug_dir = f"custom/{ql}c{qc}"
+    if not os.path.exists(debug_dir):
+        os.mkdir(debug_dir)
+    # ===============
+
     query = qf.view(-1,1)
     # print(query.shape)
     score = torch.mm(gf,query)
@@ -24,12 +33,12 @@ def evaluate(qf,ql,qc,gf,gl,gc):
     junk_index1 = np.argwhere(gl==-1)
     junk_index2 = np.intersect1d(query_index, camera_index)
     junk_index = np.append(junk_index2, junk_index1) #.flatten())
-    
-    CMC_tmp = compute_mAP(index, good_index, junk_index)
+
+    CMC_tmp = compute_mAP(index, good_index, junk_index, filenames, debug_dir)
     return CMC_tmp
 
 
-def compute_mAP(index, good_index, junk_index):
+def compute_mAP(index, good_index, junk_index, filenames, debug_dir):
     ap = 0
     cmc = torch.IntTensor(len(index)).zero_()
     if good_index.size==0:   # if empty
@@ -43,8 +52,13 @@ def compute_mAP(index, good_index, junk_index):
     # find good_index index
     ngood = len(good_index)
     mask = np.in1d(index, good_index)
-    rows_good = np.argwhere(mask==True)
+    rows_good = np.argwhere(mask)
     rows_good = rows_good.flatten()
+
+    # ===== DEBUG =====
+    for i, idx in enumerate(index[:10]):
+        shutil.copy(filenames[str(idx)], f"{debug_dir}/{i}r{rows_good[0]}_{filenames[str(idx)].split('/')[-1]}")
+    # =================
     
     cmc[rows_good[0]:] = 1
     for i in range(ngood):
@@ -76,6 +90,10 @@ if multi:
     mquery_label = m_result['mquery_label'][0]
     mquery_feature = mquery_feature.cuda()
 
+# ====== DEBUG ======
+with open("custom/filenames.json", "r") as rfile:
+    filenames = json.load(rfile)
+
 query_feature = query_feature.cuda()
 gallery_feature = gallery_feature.cuda()
 
@@ -84,7 +102,16 @@ CMC = torch.IntTensor(len(gallery_label)).zero_()
 ap = 0.0
 #print(query_label)
 for i in range(len(query_label)):
-    ap_tmp, CMC_tmp = evaluate(query_feature[i],query_label[i],query_cam[i],gallery_feature,gallery_label,gallery_cam)
+    ap_tmp, CMC_tmp = evaluate(
+        query_feature[i],
+        query_label[i],
+        query_cam[i],
+        gallery_feature,
+        gallery_label,
+        gallery_cam,
+        filenames
+    )
+    print(f"{query_label[i]}{query_cam[i]}: {CMC_tmp[0]}")
     if CMC_tmp[0]==-1:
         continue
     CMC = CMC + CMC_tmp
