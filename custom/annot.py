@@ -6,7 +6,6 @@ import logging
 import json
 import os
 from pathlib import Path
-import random
 import re
 import shutil
 from typing import (
@@ -16,6 +15,7 @@ from typing import (
 )
 
 import cv2
+from sklearn.model_selection import train_test_split
 
 
 logging.basicConfig(level=logging.INFO)
@@ -43,7 +43,7 @@ class Camera:
 
     def __init__(
         self,
-        location: str,
+        location: int,
         n: int,
         sequence_n: str,
         image: cv2.Mat,
@@ -226,7 +226,28 @@ def replace_labelstudio_paths(
     return annot
 
 
-def prepare_test_set(src: Path, dst: Path = None):
+def choose_best_image(images: List[Path]) -> Path:
+    """
+    Choose image with highest resolution
+    """
+
+    best = (images[0], cv2.imread(str(images[0])))
+    for im in images:
+        image = cv2.imread(str(im))
+        if image.size > best[1].size:
+            best = (im, image)
+
+    return best[0]
+
+
+def prepare_train_test_set(
+    src: Path,
+    dst: Path = None,
+    do_test=False,
+    train_size=0.7,
+    val_size=0.15,
+    test_size=0.15,
+):
     """
     Prepare directory structure for running reID.
 
@@ -242,41 +263,71 @@ def prepare_test_set(src: Path, dst: Path = None):
     if not dst.exists():
         dst.mkdir()
 
+    train_dir = dst / "train"
+    val_dir = dst / "val"
     gallery_dir = dst / "gallery"
-    if not gallery_dir.exists():
-        gallery_dir.mkdir()
     query_dir = dst / "query"
-    if not query_dir.exists():
-        query_dir.mkdir()
+
+    dirs = [gallery_dir, train_dir, val_dir]
+
+    for dir_ in dirs:
+        if dir_.exists():
+            shutil.rmtree(dir_)
+        dir_.mkdir()
 
     img_by_person_id = defaultdict(lambda: defaultdict(list))
 
     # organize images by person ID
     for file_ in src.glob("*.jpg"):
         file_ = Path(file_)
-        person_id, camera_sene_id = file_.name.split("_")[:2]
-        img_by_person_id[person_id][camera_sene_id].append(file_)
+        person_id, camera_scene_id = file_.name.split("_")[:2]
+        img_by_person_id[person_id][camera_scene_id].append(file_)
 
     # create query and gallery folders used for testing
     for person_id, camera_scene in img_by_person_id.items():
-        person_gallery_dir = gallery_dir / person_id
+        dirs = [
+            gallery_dir / person_id,
+            train_dir / person_id,
+            val_dir / person_id,
+        ]
 
-        if not person_gallery_dir.exists():
-            person_gallery_dir.mkdir()
+        for dir_ in dirs:
+            if not dir_.exists():
+                dir_.mkdir()
 
-        person_query_dir = query_dir / person_id
-        if not person_query_dir.exists():
-            person_query_dir.mkdir()
+        # person_query_dir = query_dir / person_id
+        # if not person_query_dir.exists():
+        #     person_query_dir.mkdir()
 
         for imgs in camera_scene.values():
-            sample = random.choice(imgs)
-            imgs.remove(sample)
+            # sample = random.choice(imgs)
+            # sample = choose_best_image(imgs)
+            # imgs.remove(sample)
 
             # copy a randomly chosen sample for each camera scene to query dir
-            shutil.copy(sample, person_query_dir / sample.name)
+            # shutil.copy(sample, person_query_dir / sample.name)
             # copy all remaining images to gallery dir
-            for img in imgs:
-                shutil.copy(img, person_gallery_dir / img.name)
+
+            if len(imgs) == 1:
+                train = [imgs[0]]
+                test, val = [], []
+            else:
+                train, test = train_test_split(
+                    imgs, test_size=(test_size + val_size), train_size=train_size
+                )
+                if len(test) == 1:
+                    # single sample can't be further splitted
+                    sample = test[0]
+                    test = [sample]
+                    val = [sample]
+                else:
+                    test, val = train_test_split(
+                        test, test_size=test_size / (test_size + val_size)
+                    )
+
+            for imgs, dir_ in zip([test, train, val], dirs):
+                for im in imgs:
+                    shutil.copy(im, dir_ / im.name)
 
 
 if __name__ == "__main__":
@@ -319,4 +370,4 @@ if __name__ == "__main__":
             crop.export_to_reid(exported_path)
 
     # generate data structure required for testing reID
-    prepare_test_set(exported_path, dest_path)
+    prepare_train_test_set(exported_path, dest_path)
