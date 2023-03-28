@@ -1,5 +1,6 @@
 import argparse
 from collections import defaultdict
+import random
 
 import logging
 
@@ -9,6 +10,7 @@ from pathlib import Path
 import re
 import shutil
 from typing import (
+    Dict,
     List,
     Optional,
     Tuple,
@@ -243,19 +245,27 @@ def choose_best_image(images: List[Path]) -> Path:
 def prepare_train_test_set(
     src: Path,
     dst: Path = None,
-    do_test=False,
-    train_size=0.7,
-    val_size=0.15,
-    test_size=0.15,
+    train_size: float = 0.7,
+    test_size: float = 0.3,
+    val: bool = False,
 ):
     """
     Prepare directory structure for running reID.
 
     Parameters
     ----------
-    path:
-        Root data directory path
+    src: Path
+        Path to directory containing images.
+    dst: Path
+        Path to directory where to store prepared data.
+    train_size: float
+        Size of training set. Value between 0 and 1.
+    test_size: float
+        Size of test set. Value between 0 and 1.
+    val: bool
+        If True, create validation set.
     """
+
     if dst is None:
         dst = src
     if not src.exists():
@@ -275,6 +285,142 @@ def prepare_train_test_set(
             shutil.rmtree(dir_)
         dir_.mkdir()
 
+    img_by_person_id_dict = img_by_person_id(src)
+    # img_by_person_id = defaultdict(lambda: defaultdict(list))
+
+    # # organize images by person ID
+    # for file_ in src.glob("*.jpg"):
+    #     file_ = Path(file_)
+    #     person_id, camera_scene_id = file_.name.split("_")[:2]
+    #     img_by_person_id[person_id][camera_scene_id].append(file_)
+
+    if val:
+        # pick a random sample for each person for validation
+        for person_id, camera_scene in img_by_person_id_dict.items():
+            if not (val_dir / person_id).exists():
+                (val_dir / person_id).mkdir()
+
+            for imgs in camera_scene.values():
+                sample = random.choice(imgs)
+                imgs.remove(sample)
+                shutil.copy(sample, val_dir / person_id / sample.name)
+                break
+
+    # create query and gallery folders used for testing
+    for person_id, camera_scene in img_by_person_id_dict.items():
+        dirs = [
+            gallery_dir / person_id,
+            train_dir / person_id,
+        ]
+
+        for dir_ in dirs:
+            if not dir_.exists():
+                dir_.mkdir()
+
+        for imgs in camera_scene.values():
+            if len(imgs) == 0:
+                continue
+
+            if train_size == 0:
+                # no train set
+                test = imgs[:]
+                train = []
+            else:
+                if len(imgs) == 1:
+                    # single image can't be splitted
+                    train = imgs[:]
+                    test = []
+                else:
+                    train, test = train_test_split(
+                        imgs, test_size=test_size, train_size=train_size
+                    )
+
+            for imgs, dir_ in zip([test, train], dirs):
+                for im in imgs:
+                    shutil.copy(im, dir_ / im.name)
+
+    create_query_from_gallery(gallery_dir, query_dir, backup=True)
+
+
+def create_query_from_gallery(
+    gallery_path: Path,
+    query_path: Path,
+    noise_dir: Path = Path("-1"),
+    backup: bool = False,
+):
+    """
+    Create a query set from gallery set.
+
+    Parameters
+    ----------
+    gallery_path: Path
+        Path to gallery set.
+    query_path: Path
+        Path to query set.
+    backup: bool
+        If True, create a backup of gallery set.
+    """
+    if backup:
+        backup_path = gallery_path.parent / f"{gallery_path.name}_backup"
+        if backup_path.exists():
+            # remove previous backup
+            shutil.rmtree(backup_path)
+        shutil.copytree(gallery_path, backup_path)
+
+    if not query_path.exists():
+        query_path.mkdir()
+
+    for person_dir in gallery_path.glob("*"):
+        person_dir = Path(person_dir)
+        if not person_dir.is_dir():
+            continue
+        if "-" in person_dir.name:
+            continue
+
+        query_person_path = query_path / person_dir.name
+        if not query_person_path.exists():
+            query_person_path.mkdir()
+
+        img_by_person_id_dict = img_by_person_id(person_dir)
+
+        # select randomly one image from each camera scene
+        # and move it to query set
+        for camera_scene in img_by_person_id_dict.values():
+            for imgs in camera_scene.values():
+                # do not create a query set for a camera scene with only one frame
+                if len(imgs) < 2:
+                    continue
+                sample = random.choice(imgs)
+                shutil.move(sample, query_person_path / sample.name)
+
+        # remove all empty query folders
+        if len(list(query_person_path.glob("*"))) == 0:
+            query_person_path.rmdir()
+            # move frames from corresponding gallery folder to noise folder
+            if not noise_dir.exists():
+                noise_dir.mkdir()
+            for file_ in person_dir.glob("*.jpg"):
+                # move gallery frames corresponding to empty query folder to noise folder
+                file_ = Path(file_)
+                shutil.move(file_, noise_dir / file_.name)
+            person_dir.rmdir()
+
+
+def img_by_person_id(src: Path) -> Dict[str, Dict[str, List[Path]]]:
+    """
+    Organize images by person ID.
+
+    Parameters
+    ----------
+    src: Path
+        Path to source directory.
+
+    Returns
+    -------
+    img_by_person_id: Dict[str, Dict[str, List[Path]]]
+        Dictionary with person ID as key and dictionary with camera scene ID as key
+        and list of images as value.
+    """
     img_by_person_id = defaultdict(lambda: defaultdict(list))
 
     # organize images by person ID
@@ -283,51 +429,7 @@ def prepare_train_test_set(
         person_id, camera_scene_id = file_.name.split("_")[:2]
         img_by_person_id[person_id][camera_scene_id].append(file_)
 
-    # create query and gallery folders used for testing
-    for person_id, camera_scene in img_by_person_id.items():
-        dirs = [
-            gallery_dir / person_id,
-            train_dir / person_id,
-            val_dir / person_id,
-        ]
-
-        for dir_ in dirs:
-            if not dir_.exists():
-                dir_.mkdir()
-
-        # person_query_dir = query_dir / person_id
-        # if not person_query_dir.exists():
-        #     person_query_dir.mkdir()
-
-        for imgs in camera_scene.values():
-            # sample = random.choice(imgs)
-            # sample = choose_best_image(imgs)
-            # imgs.remove(sample)
-
-            # copy a randomly chosen sample for each camera scene to query dir
-            # shutil.copy(sample, person_query_dir / sample.name)
-            # copy all remaining images to gallery dir
-
-            if len(imgs) == 1:
-                train = [imgs[0]]
-                test, val = [], []
-            else:
-                train, test = train_test_split(
-                    imgs, test_size=(test_size + val_size), train_size=train_size
-                )
-                if len(test) == 1:
-                    # single sample can't be further splitted
-                    sample = test[0]
-                    test = [sample]
-                    val = [sample]
-                else:
-                    test, val = train_test_split(
-                        test, test_size=test_size / (test_size + val_size)
-                    )
-
-            for imgs, dir_ in zip([test, train, val], dirs):
-                for im in imgs:
-                    shutil.copy(im, dir_ / im.name)
+    return img_by_person_id
 
 
 if __name__ == "__main__":
@@ -339,6 +441,9 @@ if __name__ == "__main__":
         default="annot.json",
         help="Annotations file within source directory.",
     )
+    parser.add_argument("--test-size", type=float, default=0.3, help="Test set size")
+    parser.add_argument("--train-size", type=float, default=0.7, help="Train set size")
+    parser.add_argument("--backup", action="store_true", help="Backup data set")
 
     args = parser.parse_args()
 
@@ -346,28 +451,34 @@ if __name__ == "__main__":
     dest_path = Path(args.dest)
 
     # load annotations file
-    with (source_path / args.annotations).open("r", encoding="utf-8") as rfile:
-        annotations = json.load(rfile)
+    # with (source_path / args.annotations).open("r", encoding="utf-8") as rfile:
+    #     annotations = json.load(rfile)
 
     # rename image paths to match local system
-    new_annotations = []
-    for annotation in annotations:
-        dir_name = "_".join(annotation["image"].split("-")[1].split("_")[:3])
-        new_annotation = replace_labelstudio_paths(
-            annotation, source_path / dir_name, rf"{dir_name}_\d{{4}}\.jpg"
-        )
-        new_annotations.append(new_annotation)
+    # new_annotations = []
+    # for annotation in annotations:
+    #     dir_name = "_".join(annotation["image"].split("-")[1].split("_")[:3])
+    #     new_annotation = replace_labelstudio_paths(
+    #         annotation, source_path / dir_name, rf"{dir_name}_\d{{4}}\.jpg"
+    #     )
+    #     new_annotations.append(new_annotation)
 
     # parse label studio data
-    bbox_annotations = [labelstudio2bbox(x) for x in new_annotations]
+    # bbox_annotations = [labelstudio2bbox(x) for x in new_annotations]
 
-    exported_path = dest_path / "exported"
+    exported_path = source_path / "exported"
 
     # crop bounding boxes from source images
-    for bbox_annot in bbox_annotations:
-        cropped = bbox_annot.crop_bbox()
-        for crop in cropped:
-            crop.export_to_reid(exported_path)
+    # for bbox_annot in bbox_annotations:
+    #     cropped = bbox_annot.crop_bbox()
+    #     for crop in cropped:
+    #         crop.export_to_reid(exported_path)
 
     # generate data structure required for testing reID
-    prepare_train_test_set(exported_path, dest_path)
+    prepare_train_test_set(
+        exported_path,
+        dest_path,
+        val=False,
+        train_size=0.0,
+        test_size=1.0,
+    )
