@@ -29,12 +29,11 @@ def evaluate(qf, ql, qc, gf, gl, gc, filenames):
     camera_index = np.argwhere(gc == qc)
 
     good_index = np.setdiff1d(query_index, camera_index, assume_unique=True)
-    junk_index1 = np.argwhere(gl == -1)
+    junk_index1 = np.argwhere(gl < 0)
     junk_index2 = np.intersect1d(query_index, camera_index)
-    junk_index = np.append(junk_index2, junk_index1)  # .flatten())
+    junk_index = np.append(junk_index2, junk_index1)
 
     CMC_tmp = compute_mAP(index, good_index, junk_index, filenames, debug_dir)
-    # CMC_tmp = compute_mAP(index, good_index, junk_index, None, None)
     return CMC_tmp
 
 

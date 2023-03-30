@@ -51,19 +51,19 @@ class Camera:
         image: cv2.Mat,
         annotations: List[Annotation] = None,
     ):
+        if location not in Camera._scene_mapping:
+            Camera._scene_mapping[location] = Camera._scene_count
+            Camera._scene_count += 1
+            Annotation.update_start_id()
+
         self.location = location
-        self.n = n
+        self.n = n + Camera._scene_mapping[location]
         self.sequence_n = sequence_n
         self.image = image
         if annotations is None:
             self.annotations = []
         else:
             self.annotations = annotations
-
-        if location not in Camera._scene_mapping:
-            Camera._scene_mapping[location] = Camera._scene_count
-            Camera._scene_count += 1
-            Annotation.update_start_id()
 
     def __str__(self) -> str:
         return str(self.__dict__)
@@ -228,20 +228,6 @@ def replace_labelstudio_paths(
     return annot
 
 
-def choose_best_image(images: List[Path]) -> Path:
-    """
-    Choose image with highest resolution
-    """
-
-    best = (images[0], cv2.imread(str(images[0])))
-    for im in images:
-        image = cv2.imread(str(im))
-        if image.size > best[1].size:
-            best = (im, image)
-
-    return best[0]
-
-
 def prepare_train_test_set(
     src: Path,
     dst: Path = None,
@@ -278,7 +264,9 @@ def prepare_train_test_set(
     gallery_dir = dst / "gallery"
     query_dir = dst / "query"
 
-    dirs = [gallery_dir, train_dir, val_dir]
+    dirs = [gallery_dir, train_dir]
+    if val:
+        dirs.append(val_dir)
 
     for dir_ in dirs:
         if dir_.exists():
@@ -286,28 +274,21 @@ def prepare_train_test_set(
         dir_.mkdir()
 
     img_by_person_id_dict = img_by_person_id(src)
-    # img_by_person_id = defaultdict(lambda: defaultdict(list))
-
-    # # organize images by person ID
-    # for file_ in src.glob("*.jpg"):
-    #     file_ = Path(file_)
-    #     person_id, camera_scene_id = file_.name.split("_")[:2]
-    #     img_by_person_id[person_id][camera_scene_id].append(file_)
 
     if val:
         # pick a random sample for each person for validation
-        for person_id, camera_scene in img_by_person_id_dict.items():
+        for person_id, camera_id in img_by_person_id_dict.items():
             if not (val_dir / person_id).exists():
                 (val_dir / person_id).mkdir()
 
-            for imgs in camera_scene.values():
+            for imgs in camera_id.values():
                 sample = random.choice(imgs)
                 imgs.remove(sample)
                 shutil.copy(sample, val_dir / person_id / sample.name)
                 break
 
     # create query and gallery folders used for testing
-    for person_id, camera_scene in img_by_person_id_dict.items():
+    for person_id, camera_id in img_by_person_id_dict.items():
         dirs = [
             gallery_dir / person_id,
             train_dir / person_id,
@@ -317,7 +298,7 @@ def prepare_train_test_set(
             if not dir_.exists():
                 dir_.mkdir()
 
-        for imgs in camera_scene.values():
+        for imgs in camera_id.values():
             if len(imgs) == 0:
                 continue
 
@@ -385,8 +366,8 @@ def create_query_from_gallery(
 
         # select randomly one image from each camera scene
         # and move it to query set
-        for camera_scene in img_by_person_id_dict.values():
-            for imgs in camera_scene.values():
+        for camera_id in img_by_person_id_dict.values():
+            for imgs in camera_id.values():
                 # do not create a query set for a camera scene with only one frame
                 if len(imgs) < 2:
                     continue
@@ -426,8 +407,13 @@ def img_by_person_id(src: Path) -> Dict[str, Dict[str, List[Path]]]:
     # organize images by person ID
     for file_ in src.glob("*.jpg"):
         file_ = Path(file_)
-        person_id, camera_scene_id = file_.name.split("_")[:2]
-        img_by_person_id[person_id][camera_scene_id].append(file_)
+        person_id, camera_id = file_.name.split("_")[:2]
+        try:
+            camera_id = re.search(r"(?<=c)(\d+)", camera_id).group(0)
+        except AttributeError as err:
+            raise AttributeError(f"Could not parse camera ID from {file_}") from err
+
+        img_by_person_id[person_id][camera_id].append(file_)
 
     return img_by_person_id
 
@@ -436,49 +422,63 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate data set for reID testing")
     parser.add_argument("--source", help="Source data directory", required=True)
     parser.add_argument("--dest", help="Destination data directory", required=True)
+
+    subparsers = parser.add_subparsers(dest="mode")
+
+    # Export Milestone data subparser
+    parser_export = subparsers.add_parser("export", description="Export Milestone data")
     parser.add_argument(
         "--annotations",
         default="annot.json",
         help="Annotations file within source directory.",
     )
-    parser.add_argument("--test-size", type=float, default=0.3, help="Test set size")
-    parser.add_argument("--train-size", type=float, default=0.7, help="Train set size")
-    parser.add_argument("--backup", action="store_true", help="Backup data set")
+
+    # Prepare train test set subparser
+    parser_train_test = subparsers.add_parser(
+        "prep", description="Prepare train test set"
+    )
+    parser_train_test.add_argument(
+        "--test-size", type=float, default=0.3, help="Test set size"
+    )
+    parser_train_test.add_argument(
+        "--train-size", type=float, default=0.7, help="Train set size"
+    )
+
+    # parser.add_argument("--backup", action="store_true", help="Backup data set")
 
     args = parser.parse_args()
 
     source_path = Path(args.source)
-    dest_path = Path(args.dest)
-
-    # load annotations file
-    # with (source_path / args.annotations).open("r", encoding="utf-8") as rfile:
-    #     annotations = json.load(rfile)
-
-    # rename image paths to match local system
-    # new_annotations = []
-    # for annotation in annotations:
-    #     dir_name = "_".join(annotation["image"].split("-")[1].split("_")[:3])
-    #     new_annotation = replace_labelstudio_paths(
-    #         annotation, source_path / dir_name, rf"{dir_name}_\d{{4}}\.jpg"
-    #     )
-    #     new_annotations.append(new_annotation)
-
-    # parse label studio data
-    # bbox_annotations = [labelstudio2bbox(x) for x in new_annotations]
-
     exported_path = source_path / "exported"
 
-    # crop bounding boxes from source images
-    # for bbox_annot in bbox_annotations:
-    #     cropped = bbox_annot.crop_bbox()
-    #     for crop in cropped:
-    #         crop.export_to_reid(exported_path)
+    if args.mode == "export":
+        # load annotations file
+        with (source_path / args.annotations).open("r", encoding="utf-8") as rfile:
+            annotations = json.load(rfile)
 
-    # generate data structure required for testing reID
-    prepare_train_test_set(
-        exported_path,
-        dest_path,
-        val=False,
-        train_size=0.0,
-        test_size=1.0,
-    )
+        # rename image paths to match local system
+        new_annotations = []
+        for annotation in annotations:
+            dir_name = "_".join(annotation["image"].split("-")[1].split("_")[:3])
+            new_annotation = replace_labelstudio_paths(
+                annotation, source_path / dir_name, rf"{dir_name}_\d{{4}}\.jpg"
+            )
+            new_annotations.append(new_annotation)
+
+        # parse label studio data
+        bbox_annotations = [labelstudio2bbox(x) for x in new_annotations]
+
+        # crop bounding boxes from source images
+        for bbox_annot in bbox_annotations:
+            cropped = bbox_annot.crop_bbox()
+            for crop in cropped:
+                crop.export_to_reid(exported_path)
+
+    elif args.mode == "train_test":
+        # generate data structure required for testing reID
+        prepare_train_test_set(
+            exported_path,
+            Path(args.dest),
+            train_size=0.0,
+            test_size=1.0,
+        )
