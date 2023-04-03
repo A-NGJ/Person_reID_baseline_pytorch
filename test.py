@@ -299,16 +299,15 @@ def get_id(img_path):
     camera_id = []
     labels = []
     for path, v in img_path:
-        # filename = path.split('/')[-1]
         filename = os.path.basename(path)
+        dirname = os.path.basename(os.path.dirname(path))
         label = filename[0:4]
         camera = filename.split("c")[1]
         # remove zero padding from label
-        label = labels.append(int(label.lstrip("0")))
-        # if label[0:2]=='-1':
-        #     labels.append(-1)
-        # else:
-        #     labels.append(int(label))
+        if dirname == "noise":  # TODO: use constant instead of string
+            labels.append(-1)
+        else:
+            label = labels.append(int(label.lstrip("0")))
         camera_id.append(int(camera[0]))
     return camera_id, labels
 

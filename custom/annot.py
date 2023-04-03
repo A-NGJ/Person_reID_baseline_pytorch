@@ -22,21 +22,23 @@ from sklearn.model_selection import train_test_split
 
 logging.basicConfig(level=logging.INFO)
 
+NOISE_DIR_NAME = "noise"
+
 
 class Annotation:
-    _used_ids = set()
-    _start_id = 0
+    # _used_ids = set()
+    # _start_id = 0
 
-    @classmethod
-    def update_start_id(cls):
-        cls._start_id += len(cls._used_ids)
+    # @classmethod
+    # def update_start_id(cls):
+    #     cls._start_id += len(cls._used_ids)
 
-    def __init__(self, bbox: Tuple[int, int, int, int], id_: int, copy_id=False):
-        Annotation._used_ids.add(id_)
+    def __init__(self, bbox: Tuple[int, int, int, int], id_: int):
+        # Annotation._used_ids.add(id_)
         self.bbox = bbox
         self.id_ = id_
-        if not copy_id:
-            self.id_ += Annotation._start_id
+        # if not copy_id:
+        #     self.id_ += Annotation._start_id
 
 
 class Camera:
@@ -54,7 +56,7 @@ class Camera:
         if location not in Camera._scene_mapping:
             Camera._scene_mapping[location] = Camera._scene_count
             Camera._scene_count += 1
-            Annotation.update_start_id()
+            # Annotation.update_start_id()
 
         self.location = location
         self.n = n + Camera._scene_mapping[location]
@@ -111,7 +113,6 @@ class Camera:
                         Annotation(
                             (x, y, annot.bbox[2], annot.bbox[3]),
                             annot.id_,
-                            copy_id=True,
                         )
                     ],
                 )
@@ -326,7 +327,6 @@ def prepare_train_test_set(
 def create_query_from_gallery(
     gallery_path: Path,
     query_path: Path,
-    noise_dir: Path = Path("-1"),
     backup: bool = False,
 ):
     """
@@ -341,6 +341,8 @@ def create_query_from_gallery(
     backup: bool
         If True, create a backup of gallery set.
     """
+    noise_dir = gallery_path / NOISE_DIR_NAME
+
     if backup:
         backup_path = gallery_path.parent / f"{gallery_path.name}_backup"
         if backup_path.exists():
@@ -353,9 +355,7 @@ def create_query_from_gallery(
 
     for person_dir in gallery_path.glob("*"):
         person_dir = Path(person_dir)
-        if not person_dir.is_dir():
-            continue
-        if "-" in person_dir.name:
+        if not person_dir.is_dir() or "-" in person_dir.name:
             continue
 
         query_person_path = query_path / person_dir.name
@@ -422,25 +422,28 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate data set for reID testing")
     parser.add_argument("--source", help="Source data directory", required=True)
     parser.add_argument("--dest", help="Destination data directory", required=True)
+    parser.add_argument(
+        "--clear",
+        action="store_true",
+        help="Clear destination directory beforehand",
+    )
 
     subparsers = parser.add_subparsers(dest="mode")
 
     # Export Milestone data subparser
     parser_export = subparsers.add_parser("export", description="Export Milestone data")
-    parser.add_argument(
+    parser_export.add_argument(
         "--annotations",
         default="annot.json",
         help="Annotations file within source directory.",
     )
 
     # Prepare train test set subparser
-    parser_train_test = subparsers.add_parser(
-        "prep", description="Prepare train test set"
-    )
-    parser_train_test.add_argument(
+    parser_prep = subparsers.add_parser("prep", description="Prepare train test set")
+    parser_prep.add_argument(
         "--test-size", type=float, default=0.3, help="Test set size"
     )
-    parser_train_test.add_argument(
+    parser_prep.add_argument(
         "--train-size", type=float, default=0.7, help="Train set size"
     )
 
@@ -449,7 +452,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     source_path = Path(args.source)
-    exported_path = source_path / "exported"
+    dest_path = Path(args.dest)
+
+    if args.clear and dest_path.exists():
+        shutil.rmtree(dest_path)
 
     if args.mode == "export":
         # load annotations file
@@ -472,13 +478,13 @@ if __name__ == "__main__":
         for bbox_annot in bbox_annotations:
             cropped = bbox_annot.crop_bbox()
             for crop in cropped:
-                crop.export_to_reid(exported_path)
+                crop.export_to_reid(dest_path)
 
-    elif args.mode == "train_test":
+    elif args.mode == "prep":
         # generate data structure required for testing reID
         prepare_train_test_set(
-            exported_path,
-            Path(args.dest),
+            source_path,
+            dest_path,
             train_size=0.0,
             test_size=1.0,
         )
