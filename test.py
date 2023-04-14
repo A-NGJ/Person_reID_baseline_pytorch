@@ -3,6 +3,8 @@
 from __future__ import print_function, division
 
 import argparse
+import logging
+import re
 import shutil
 
 import torch
@@ -32,6 +34,8 @@ from model import (
     PCB_test,
 )
 from utils import fuse_all_conv_bn
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(message)s")
 
 # fp16
 try:
@@ -302,13 +306,15 @@ def get_id(img_path):
         filename = os.path.basename(path)
         dirname = os.path.basename(os.path.dirname(path))
         label = filename[0:4]
-        camera = filename.split("c")[1]
+        camera = (
+            re.search(r"c(\d+)", filename).group(1).lstrip("0")
+        )  # extract camera ID
         # remove zero padding from label
         if dirname == "noise":  # TODO: use constant instead of string
             labels.append(-1)
         else:
             label = labels.append(int(label.lstrip("0")))
-        camera_id.append(int(camera[0]))
+        camera_id.append(int(camera))
     return camera_id, labels
 
 
@@ -408,9 +414,17 @@ result = {
 }
 scipy.io.savemat("pytorch_result.mat", result)
 
-print(opt.name)
+logging.info("Evaluating %s", opt.name)
+
 result = "./model/%s/result.txt" % opt.name
+
+# save parser args to result.txt
+with open(result, "a", encoding="utf-8") as f:
+    f.write(str(opt) + "\n")
+
+logging.info("Saving result to %s", result)
 os.system(f"python evaluate_gpu.py {debug_dir} | tee -a {result}")
+
 
 if opt.multi:
     result = {

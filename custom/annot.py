@@ -1,4 +1,5 @@
 import argparse
+from dataclasses import dataclass
 from collections import defaultdict
 import random
 
@@ -25,20 +26,10 @@ logging.basicConfig(level=logging.INFO)
 NOISE_DIR_NAME = "noise"
 
 
+@dataclass
 class Annotation:
-    # _used_ids = set()
-    # _start_id = 0
-
-    # @classmethod
-    # def update_start_id(cls):
-    #     cls._start_id += len(cls._used_ids)
-
-    def __init__(self, bbox: Tuple[int, int, int, int], id_: int):
-        # Annotation._used_ids.add(id_)
-        self.bbox = bbox
-        self.id_ = id_
-        # if not copy_id:
-        #     self.id_ += Annotation._start_id
+    bbox: Tuple[int, int, int, int]
+    id_: int
 
 
 class Camera:
@@ -56,7 +47,6 @@ class Camera:
         if location not in Camera._scene_mapping:
             Camera._scene_mapping[location] = Camera._scene_count
             Camera._scene_count += 1
-            # Annotation.update_start_id()
 
         self.location = location
         self.n = n + Camera._scene_mapping[location]
@@ -94,14 +84,32 @@ class Camera:
             )
         return img_bbox
 
-    def crop_bbox(self) -> List:
-        """Crop bounding boxes from the source image"""
+    def crop_bbox(self, min_width: int = 0, min_height: int = 0) -> List:
+        """
+        Crop bounding boxes from the source image
+
+        Parameters
+        ----------
+        min_width: int
+            Minimum width of the bounding box.
+            If the width is smaller than this value, the bounding box is not cropped.
+        min_height: int
+            Minimum height of the bounding box.
+            If the height is smaller than this value, the bounding box is not cropped.
+
+        Returns
+        -------
+        cropped: List[Camera]
+            List of cropped images
+        """
 
         cropped = []
         for annot in self.annotations:
             x = int(annot.bbox[0])
             y = int(annot.bbox[1])
 
+            if annot.bbox[2] < min_width or annot.bbox[3] < min_height:
+                continue
             crop = self.image[y : y + annot.bbox[3], x : x + annot.bbox[2]]
             cropped.append(
                 Camera(
@@ -177,10 +185,7 @@ def labelstudio2bbox(annot: dict) -> Camera:
     for p in annot.get("Person", []):
         org_width = p["original_width"]
         org_height = p["original_height"]
-        labels = p.get("rectanglelabels")
-        if labels is None:
-            logging.warning("missing labels for %s", annot["image"])
-            continue
+        labels = p.get("rectanglelabels", ("ID -1",))
 
         annotation = Annotation(
             (
@@ -252,6 +257,7 @@ def prepare_train_test_set(
     val: bool
         If True, create validation set.
     """
+    person_id_dir_template = "{:0>4d}"
 
     if dst is None:
         dst = src
@@ -279,20 +285,36 @@ def prepare_train_test_set(
     if val:
         # pick a random sample for each person for validation
         for person_id, camera_id in img_by_person_id_dict.items():
-            if not (val_dir / person_id).exists():
-                (val_dir / person_id).mkdir()
+            if person_id == -1:
+                continue
+            person_id_dir = person_id_dir_template.format(person_id)
+            if not (val_dir / person_id_dir).exists():
+                (val_dir / person_id_dir).mkdir()
 
             for imgs in camera_id.values():
                 sample = random.choice(imgs)
                 imgs.remove(sample)
-                shutil.copy(sample, val_dir / person_id / sample.name)
+                shutil.copy(
+                    sample,
+                    val_dir / person_id_dir / sample.name,
+                )
                 break
 
     # create query and gallery folders used for testing
     for person_id, camera_id in img_by_person_id_dict.items():
+        # put all id = -1 to noise folder
+        if person_id == -1:
+            if not (gallery_dir / NOISE_DIR_NAME).exists():
+                (gallery_dir / NOISE_DIR_NAME).mkdir()
+
+            for imgs in camera_id.values():
+                for im in imgs:
+                    shutil.copy(im, gallery_dir / NOISE_DIR_NAME / im.name)
+            continue
+
         dirs = [
-            gallery_dir / person_id,
-            train_dir / person_id,
+            gallery_dir / person_id_dir_template.format(person_id),
+            train_dir / person_id_dir_template.format(person_id),
         ]
 
         for dir_ in dirs:
@@ -321,7 +343,7 @@ def prepare_train_test_set(
                 for im in imgs:
                     shutil.copy(im, dir_ / im.name)
 
-    create_query_from_gallery(gallery_dir, query_dir, backup=True)
+    create_query_from_gallery(gallery_dir, query_dir)
 
 
 def create_query_from_gallery(
@@ -355,7 +377,7 @@ def create_query_from_gallery(
 
     for person_dir in gallery_path.glob("*"):
         person_dir = Path(person_dir)
-        if not person_dir.is_dir() or "-" in person_dir.name:
+        if not person_dir.is_dir() or person_dir.name == NOISE_DIR_NAME:
             continue
 
         query_person_path = query_path / person_dir.name
@@ -408,6 +430,7 @@ def img_by_person_id(src: Path) -> Dict[str, Dict[str, List[Path]]]:
     for file_ in src.glob("*.jpg"):
         file_ = Path(file_)
         person_id, camera_id = file_.name.split("_")[:2]
+        person_id = int(person_id.lstrip("0"))
         try:
             camera_id = re.search(r"(?<=c)(\d+)", camera_id).group(0)
         except AttributeError as err:
@@ -437,6 +460,18 @@ if __name__ == "__main__":
         default="annot.json",
         help="Annotations file within source directory.",
     )
+    parser_export.add_argument(
+        "--min-width",
+        type=int,
+        default=0,
+        help="Minimum width of bounding box to export",
+    )
+    parser_export.add_argument(
+        "--min-height",
+        type=int,
+        default=0,
+        help="Minimum height of bounding box to export",
+    )
 
     # Prepare train test set subparser
     parser_prep = subparsers.add_parser("prep", description="Prepare train test set")
@@ -446,8 +481,11 @@ if __name__ == "__main__":
     parser_prep.add_argument(
         "--train-size", type=float, default=0.7, help="Train set size"
     )
-
-    # parser.add_argument("--backup", action="store_true", help="Backup data set")
+    parser_prep.add_argument(
+        "--val",
+        action="store_true",
+        help="Create validation set",
+    )
 
     args = parser.parse_args()
 
@@ -485,6 +523,7 @@ if __name__ == "__main__":
         prepare_train_test_set(
             source_path,
             dest_path,
-            train_size=0.0,
-            test_size=1.0,
+            train_size=args.train_size,
+            test_size=args.test_size,
+            val=args.val,
         )
