@@ -15,6 +15,7 @@ from typing import (
     List,
     Optional,
     Tuple,
+    Union,
 )
 
 import cv2
@@ -42,7 +43,7 @@ class Camera:
         n: int,
         sequence_n: str,
         image: cv2.Mat,
-        annotations: List[Annotation] = None,
+        annotations: Union[List[Annotation], None] = None,
     ):
         if location not in Camera._scene_mapping:
             Camera._scene_mapping[location] = Camera._scene_count
@@ -75,7 +76,7 @@ class Camera:
             )
             cv2.putText(
                 img_bbox,
-                "ID " + str(annot.id),
+                "ID " + str(annot.id_),
                 (x, y - 10),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.9,
@@ -236,7 +237,7 @@ def replace_labelstudio_paths(
 
 def prepare_train_test_set(
     src: Path,
-    dst: Path = None,
+    dst: Union[Path, None] = None,
     train_size: float = 0.7,
     test_size: float = 0.3,
     val: bool = False,
@@ -505,7 +506,7 @@ if __name__ == "__main__":
         for annotation in annotations:
             dir_name = "_".join(annotation["image"].split("-")[1].split("_")[:3])
             new_annotation = replace_labelstudio_paths(
-                annotation, source_path / dir_name, rf"{dir_name}_\d{{4}}\.jpg"
+                annotation, str(source_path / dir_name), rf"{dir_name}_\d{{4}}\.jpg"
             )
             new_annotations.append(new_annotation)
 
@@ -514,7 +515,9 @@ if __name__ == "__main__":
 
         # crop bounding boxes from source images
         for bbox_annot in bbox_annotations:
-            cropped = bbox_annot.crop_bbox()
+            cropped = bbox_annot.crop_bbox(
+                min_height=args.min_height, min_width=args.min_width
+            )
             for crop in cropped:
                 crop.export_to_reid(dest_path)
 

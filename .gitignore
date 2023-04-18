@@ -41,3 +41,4 @@ GPU-Re-Ranking/extension/propagation/dist
 *.pth
 
 .vscode
+.venv
