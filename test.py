@@ -305,15 +305,27 @@ def get_id(img_path):
     for path, v in img_path:
         filename = os.path.basename(path)
         dirname = os.path.basename(os.path.dirname(path))
-        label = filename[0:4]
-        camera = (
-            re.search(r"c(\d+)", filename).group(1).lstrip("0")
-        )  # extract camera ID
+        label = filename.split("_")[0]
+        # extract camera ID
+        camera = re.search(r"c(\d+)", filename)
+        if camera is None:
+            raise ValueError(f"Camera ID is not found in the filename: {filename}")
+        camera = camera.group(1).lstrip("0")
         # remove zero padding from label
         if dirname == "noise":  # TODO: use constant instead of string
             labels.append(-1)
         else:
-            label = labels.append(int(label.lstrip("0")))
+            try:
+                label = label.lstrip("0")
+                if label == "":
+                    label = 0
+                else:
+                    label = int(label)
+            except ValueError:
+                logging.warning(
+                    f"Label is not an integer: {label} (filename: {filename})"
+                )
+            label = labels.append(label)
         camera_id.append(int(camera))
     return camera_id, labels
 
