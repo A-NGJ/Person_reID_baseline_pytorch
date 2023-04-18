@@ -298,7 +298,7 @@ def train_model(
     criterion,
     optimizer,
     scheduler,
-    dir_name: str,
+    dir_name: Path,
     num_epochs: int = 25,
     patience: int = 5,
     verbose: bool = False,
@@ -532,13 +532,10 @@ def train_model(
             if phase == "val":
                 last_model_wts = model.state_dict()
                 # Early stopping
-                early_stopping(epoch_loss, model)
-                if early_stopping.early_stop:
-                    logging.info("Early stopping")
-                    break
+                early_stopping(epoch_loss)
 
                 if epoch % 10 == 9:
-                    save_network(model, dir_name / f"net_{epoch}.pth")
+                    save_network(model, str(dir_name / f"net_{epoch}.pth"))
                 draw_curve(epoch)
             if phase == "train":
                 scheduler.step()
@@ -549,6 +546,9 @@ def train_model(
             )
         )
         print()
+        if early_stopping.early_stop:
+            print("Early stopping")
+            break
 
     time_elapsed = time.time() - since
     print(
@@ -560,7 +560,7 @@ def train_model(
 
     # load best model weights
     model.load_state_dict(last_model_wts)
-    save_network(model, dir_name / "net_last.pth")
+    save_network(model, str(dir_name / "net_last.pth"))
     return model
 
 
