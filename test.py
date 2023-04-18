@@ -45,6 +45,7 @@ except ImportError:  # will be 3.x series
         "This is not an error. If you want to use low precision, i.e., fp16, please install the apex with cuda support (https://github.com/NVIDIA/apex) and update pytorch to 1.0"
     )
 ######################################################################
+
 # Options
 # --------
 

@@ -410,7 +410,10 @@ def create_query_from_gallery(
             person_dir.rmdir()
 
 
-def img_by_person_id(src: Path) -> Dict[str, Dict[str, List[Path]]]:
+def img_by_person_id(
+    src: Path,
+    glob: str,
+) -> defaultdict:
     """
     Organize images by person ID.
 
@@ -418,6 +421,8 @@ def img_by_person_id(src: Path) -> Dict[str, Dict[str, List[Path]]]:
     ----------
     src: Path
         Path to source directory.
+    glob: str
+        Glob pattern to match files.
 
     Returns
     -------
@@ -428,18 +433,130 @@ def img_by_person_id(src: Path) -> Dict[str, Dict[str, List[Path]]]:
     img_by_person_id = defaultdict(lambda: defaultdict(list))
 
     # organize images by person ID
-    for file_ in src.glob("*.jpg"):
+    for file_ in src.glob(glob):
         file_ = Path(file_)
         person_id, camera_id = file_.name.split("_")[:2]
-        person_id = int(person_id.lstrip("0"))
-        try:
-            camera_id = re.search(r"(?<=c)(\d+)", camera_id).group(0)
-        except AttributeError as err:
-            raise AttributeError(f"Could not parse camera ID from {file_}") from err
+        person_id = person_id.lstrip("0")
+        if person_id == "":
+            # Person ID is 0
+            person_id = 0
+        else:
+            person_id = int(person_id)
+        camera_id = re.search(r"(?<=c)(\d+)", camera_id)
+        if camera_id is None:
+            raise AttributeError(f"Could not parse camera ID from {file_}")
+        camera_id = int(camera_id.group(0))
 
         img_by_person_id[person_id][camera_id].append(file_)
 
     return img_by_person_id
+
+
+def merge_datasets(
+    *data_sets: Path,
+    dest: Path,
+    subdirectories: tuple = ("train", "gallery", "query", "val"),
+):
+    """
+    Merge data sets.
+
+    Parameters
+    ----------
+    data_sets: Path
+        Paths to data sets.
+    dest: Path
+        Path to destination directory.
+    subdirectories: tuple
+        Subdirectories to include.
+    """
+
+    if not dest.exists():
+        dest.mkdir()
+
+    start_id = 0
+    start_camera_id = 0
+    merged = defaultdict(lambda: defaultdict(dict))
+
+    for data_set in data_sets:
+        max_id = 0
+        max_camera_id = 0
+        for subdirectory in subdirectories:
+            src = data_set / subdirectory
+            if not src.exists():
+                continue
+
+            dst = dest / subdirectory
+            if not dst.exists():
+                dst.mkdir()
+
+            people_data = img_by_person_id(
+                src, glob="**/*.jp*"
+            )  # include both jpg and jpeg
+
+            curr_max_id = int(max(people_data.keys(), default=0))
+            if curr_max_id > max_id:
+                max_id = curr_max_id
+
+            for person_id, camera_id in people_data.items():
+                curr_max_camera_id = int(max(camera_id.keys(), default=0))
+                if curr_max_camera_id > max_camera_id:
+                    max_camera_id = curr_max_camera_id
+
+                for camera_id, imgs in camera_id.items():
+                    merged[person_id + start_id][subdirectory][
+                        camera_id + start_camera_id
+                    ] = imgs
+        # make sure that camera IDs and peole IDs are unique
+        max_camera_id += 50
+        max_id += 50
+
+        start_id += max_id
+        start_camera_id += max_camera_id
+
+    create_data_set(merged, dest)
+
+
+def create_data_set(data: dict, dest: Path):
+    """
+    Create data set from dictionary structured as follows:
+
+    dest
+    ├── gallery
+    │   ├── 0000
+    │   │   ├── 0000_c0_01.jpg
+    │   │   ├── 0000_c0_02.jpg
+    │   │   └── 0000_c1_01.jpg
+    ├── query
+    │   ├── 0000
+    │   │   ├── 0000_c0_01.jpg
+    ├── train
+    ...
+
+    Parameters
+    ----------
+    data: dict
+        Dictionary structured as follows:
+        person_id [int]: {subdirectory [str]: {camera_id [int]: [img_path [Path], ...], ...}, ...}
+    dest: Path
+        Path to destination directory.
+
+    """
+    for person_id, subdirectories in data.items():
+        for subdirectory, camera_id in subdirectories.items():
+            for camera_id, imgs in camera_id.items():
+                dst = dest / subdirectory / f"{person_id:0>4d}"
+                if dst.exists():
+                    # clean the directory before copying images
+                    shutil.rmtree(dst)
+                dst.mkdir(parents=True)
+                for img in imgs:
+                    # get the image name without the extension
+                    sequence_n = img.stem.split("_")[-1]
+
+                    shutil.copy(
+                        img,
+                        dst / f"{person_id:0>4d}_c{camera_id}_{sequence_n}{img.suffix}",
+                    )
 
 
 if __name__ == "__main__":
