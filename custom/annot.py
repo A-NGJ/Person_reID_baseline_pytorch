@@ -1,6 +1,7 @@
 import argparse
 from dataclasses import dataclass
 from collections import defaultdict
+import itertools
 import random
 
 import logging
@@ -237,10 +238,9 @@ def replace_labelstudio_paths(
 
 def prepare_train_test_set(
     src: Path,
-    dst: Union[Path, None] = None,
+    dst: Path,
     train_size: float = 0.7,
     test_size: float = 0.3,
-    val: bool = False,
 ):
     """
     Prepare directory structure for running reID.
@@ -258,93 +258,75 @@ def prepare_train_test_set(
     val: bool
         If True, create validation set.
     """
-    person_id_dir_template = "{:0>4d}"
-
-    if dst is None:
-        dst = src
     if not src.exists():
-        src.mkdir()
+        raise ValueError(f"Source directory {src} does not exist.")
+
     if not dst.exists():
         dst.mkdir()
 
-    train_dir = dst / "train"
-    val_dir = dst / "val"
-    gallery_dir = dst / "gallery"
-    query_dir = dst / "query"
+    img_by_person_id_dict = img_by_person_id(src, "*.jpg")
 
-    dirs = [gallery_dir, train_dir]
-    if val:
-        dirs.append(val_dir)
+    # get the list of all person ids and noise ids
+    noise_ids = [id_ for id_ in img_by_person_id_dict.keys() if id_ < 1]
+    person_ids = [id_ for id_ in img_by_person_id_dict.keys() if id_ > 0]
+    # get the train and test indices
+    if test_size == 1:
+        train_indices = []
+        test_indices = person_ids
+    else:
+        train_indices, test_indices = train_test_split(
+            person_ids, train_size=train_size, test_size=test_size
+        )
 
-    for dir_ in dirs:
-        if dir_.exists():
-            shutil.rmtree(dir_)
-        dir_.mkdir()
+    val_img_by_person_id_dict = {}
+    # parse img_by_person_id to format expected by create_dataset
+    train_img_by_person_id_dict = {
+        person_id: img_by_person_id_dict[person_id] for person_id in train_indices
+    }
+    # pick a random sample for each person for validation
+    for person_id, camera_id in train_img_by_person_id_dict.items():
+        # pick a random sample from camera_id.items()
+        camera_id, imgs = random.choice(list(camera_id.items()))
+        # pick a random sample from imgs and return its index
+        sample = random.choice(imgs)
+        index = imgs.index(sample)
+        # remove that sample from training set
+        del train_img_by_person_id_dict[person_id][camera_id][index]
+        # add that sample to validation set
+        val_img_by_person_id_dict[person_id] = {camera_id: [sample]}
 
-    img_by_person_id_dict = img_by_person_id(src)
+    test_img_by_person_id_dict = {
+        person_id: img_by_person_id_dict[person_id] for person_id in test_indices
+    }
 
-    if val:
-        # pick a random sample for each person for validation
-        for person_id, camera_id in img_by_person_id_dict.items():
-            if person_id == -1:
-                continue
-            person_id_dir = person_id_dir_template.format(person_id)
-            if not (val_dir / person_id_dir).exists():
-                (val_dir / person_id_dir).mkdir()
-
-            for imgs in camera_id.values():
+    # pick a random sample for each camera for each person and put it to query set
+    query_img_by_person_id_dict = {}
+    for person_id, camera_id in test_img_by_person_id_dict.items():
+        query_img_by_person_id_dict[person_id] = {}
+        for camera_id, imgs in camera_id.items():
+            if len(imgs) > 1:
+                # dont pick a sample if there is only one image in that camera
                 sample = random.choice(imgs)
-                imgs.remove(sample)
-                shutil.copy(
-                    sample,
-                    val_dir / person_id_dir / sample.name,
-                )
-                break
+                index = imgs.index(sample)
+                query_img_by_person_id_dict[person_id][camera_id] = [sample]
 
-    # create query and gallery folders used for testing
-    for person_id, camera_id in img_by_person_id_dict.items():
-        # put all id = -1 to noise folder
-        if person_id == -1:
-            if not (gallery_dir / NOISE_DIR_NAME).exists():
-                (gallery_dir / NOISE_DIR_NAME).mkdir()
+                # remove that sample from test set
+                del test_img_by_person_id_dict[person_id][camera_id][index]
 
-            for imgs in camera_id.values():
-                for im in imgs:
-                    shutil.copy(im, gallery_dir / NOISE_DIR_NAME / im.name)
-            continue
+    # add noise to the test set
+    test_img_by_person_id_dict.update(
+        {id_: img_by_person_id_dict[id_] for id_ in noise_ids}
+    )
 
-        dirs = [
-            gallery_dir / person_id_dir_template.format(person_id),
-            train_dir / person_id_dir_template.format(person_id),
-        ]
-
-        for dir_ in dirs:
-            if not dir_.exists():
-                dir_.mkdir()
-
-        for imgs in camera_id.values():
-            if len(imgs) == 0:
-                continue
-
-            if train_size == 0:
-                # no train set
-                test = imgs[:]
-                train = []
-            else:
-                if len(imgs) == 1:
-                    # single image can't be splitted
-                    train = imgs[:]
-                    test = []
-                else:
-                    train, test = train_test_split(
-                        imgs, test_size=test_size, train_size=train_size
-                    )
-
-            for imgs, dir_ in zip([test, train], dirs):
-                for im in imgs:
-                    shutil.copy(im, dir_ / im.name)
-
-    create_query_from_gallery(gallery_dir, query_dir)
+    create_dataset(
+        {
+            "train": train_img_by_person_id_dict,
+            "gallery": test_img_by_person_id_dict,
+            "query": query_img_by_person_id_dict,
+            "val": val_img_by_person_id_dict,
+        },
+        dst,
+    )
 
 
 def create_query_from_gallery(
@@ -385,7 +367,7 @@ def create_query_from_gallery(
         if not query_person_path.exists():
             query_person_path.mkdir()
 
-        img_by_person_id_dict = img_by_person_id(person_dir)
+        img_by_person_id_dict = img_by_person_id(person_dir, "*.jpg")
 
         # select randomly one image from each camera scene
         # and move it to query set
@@ -430,6 +412,7 @@ def img_by_person_id(
         Dictionary with person ID as key and dictionary with camera scene ID as key
         and list of images as value.
     """
+    src = Path(src)
     img_by_person_id = defaultdict(lambda: defaultdict(list))
 
     # organize images by person ID
@@ -503,7 +486,7 @@ def merge_datasets(
                     max_camera_id = curr_max_camera_id
 
                 for camera_id, imgs in camera_id.items():
-                    merged[person_id + start_id][subdirectory][
+                    merged[subdirectory][person_id + start_id][
                         camera_id + start_camera_id
                     ] = imgs
         # make sure that camera IDs and peole IDs are unique
@@ -513,10 +496,10 @@ def merge_datasets(
         start_id += max_id
         start_camera_id += max_camera_id
 
-    create_data_set(merged, dest)
+    create_dataset(merged, dest)
 
 
-def create_data_set(data: dict, dest: Path):
+def create_dataset(data: dict, dest: Path):
     """
     Create data set from dictionary structured as follows:
 
@@ -536,20 +519,22 @@ def create_data_set(data: dict, dest: Path):
     ----------
     data: dict
         Dictionary structured as follows:
-        person_id [int]: {subdirectory [str]: {camera_id [int]: [img_path [Path], ...], ...}, ...}
+        subdirectory [str]: {person_id [int]: {camera_id [int]: [img_path [Path], ...], ...}, ...}
     dest: Path
         Path to destination directory.
 
     """
-    for person_id, subdirectories in data.items():
-        for subdirectory, camera_id in subdirectories.items():
+    # clean up destination directory before copying files
+    if dest_path.exists():
+        shutil.rmtree(dest)
+
+    for subdirectory, person_ids in data.items():
+        for person_id, camera_id in person_ids.items():
             for camera_id, imgs in camera_id.items():
                 dst = dest / subdirectory / f"{person_id:0>4d}"
-                if dst.exists():
-                    # clean the directory before copying images
-                    shutil.rmtree(dst)
-                dst.mkdir(parents=True)
+                dst.mkdir(parents=True, exist_ok=True)
                 for img in imgs:
+                    img = Path(img)
                     # get the image name without the extension
                     sequence_n = img.stem.split("_")[-1]
 
@@ -561,7 +546,12 @@ def create_data_set(data: dict, dest: Path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate data set for reID testing")
-    parser.add_argument("--source", help="Source data directory", required=True)
+    parser.add_argument(
+        "--sources",
+        nargs="+",
+        help="Source data directories",
+        required=True,
+    )
     parser.add_argument("--dest", help="Destination data directory", required=True)
     parser.add_argument(
         "--clear",
@@ -605,9 +595,17 @@ if __name__ == "__main__":
         help="Create validation set",
     )
 
+    # Merge data sets subparser
+    parser_merge = subparsers.add_parser("merge", description="Merge data sets")
+
     args = parser.parse_args()
 
-    source_path = Path(args.source)
+    source_paths = []
+    for source in args.sources:
+        source_path = Path(source)
+        if not source_path.exists():
+            raise ValueError(f"Source path {source_path} does not exist")
+        source_paths.append(source_path)
     dest_path = Path(args.dest)
 
     if args.clear and dest_path.exists():
@@ -615,7 +613,7 @@ if __name__ == "__main__":
 
     if args.mode == "export":
         # load annotations file
-        with (source_path / args.annotations).open("r", encoding="utf-8") as rfile:
+        with (source_paths[0] / args.annotations).open("r", encoding="utf-8") as rfile:
             annotations = json.load(rfile)
 
         # rename image paths to match local system
@@ -623,7 +621,7 @@ if __name__ == "__main__":
         for annotation in annotations:
             dir_name = "_".join(annotation["image"].split("-")[1].split("_")[:3])
             new_annotation = replace_labelstudio_paths(
-                annotation, str(source_path / dir_name), rf"{dir_name}_\d{{4}}\.jpg"
+                annotation, str(source_paths[0] / dir_name), rf"{dir_name}_\d{{4}}\.jpg"
             )
             new_annotations.append(new_annotation)
 
@@ -641,9 +639,10 @@ if __name__ == "__main__":
     elif args.mode == "prep":
         # generate data structure required for testing reID
         prepare_train_test_set(
-            source_path,
+            source_paths[0],
             dest_path,
             train_size=args.train_size,
             test_size=args.test_size,
-            val=args.val,
         )
+    elif args.mode == "merge":
+        merge_datasets(*source_paths, dest=dest_path)
