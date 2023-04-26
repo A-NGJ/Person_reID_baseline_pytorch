@@ -3,24 +3,32 @@
 from __future__ import print_function, division
 
 import argparse
+import json
 import logging
+import math
+import os
 import re
 import shutil
+import time
 
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.optim import lr_scheduler
+import torch.utils.data
+from torch import nn
+
+# import torch.optim as optim
+# from torch.optim import lr_scheduler
 from torch.autograd import Variable
-import torch.backends.cudnn as cudnn
+from torch.backends import cudnn
 import numpy as np
-import torchvision
-from torchvision import datasets, models, transforms
-import time
-import os
+
+# import torchvision
+from torchvision import (
+    datasets,
+    # models,
+    transforms,
+)
 import scipy.io
 import yaml
-import math
 from model import (
     ft_net,
     ft_net_dense,
@@ -34,6 +42,7 @@ from model import (
     PCB_test,
 )
 from utils import fuse_all_conv_bn
+import evaluate_gpu
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(message)s")
 
@@ -41,14 +50,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(message)s")
 try:
     from apex.fp16_utils import *
 except ImportError:  # will be 3.x series
-    print(
-        "This is not an error. If you want to use low precision, i.e., fp16, please install the apex with cuda support (https://github.com/NVIDIA/apex) and update pytorch to 1.0"
+    logging.warning(
+        "This is not an error. If you want to use low precision, i.e., fp16, "
+        "please install the apex with cuda support (https://github.com/NVIDIA/apex) "
+        "and update pytorch to 1.0"
     )
 ######################################################################
-
-# Options
-# --------
-
 parser = argparse.ArgumentParser(description="Test")
 parser.add_argument(
     "--gpu_ids", default="0", type=str, help="gpu_ids: e.g. 0  0,1,2  0,2"
@@ -121,7 +128,7 @@ for str_id in str_ids:
     if id >= 0:
         gpu_ids.append(id)
 
-print("We use the scale: %s" % opt.ms)
+logging.info(f"We use the scale: {opt.ms}")
 str_ms = opt.ms.split(",")
 ms = []
 for s in str_ms:
@@ -147,38 +154,29 @@ else:
 
 data_transforms = transforms.Compose(
     [
-        transforms.Resize((h, w), interpolation=3),
+        transforms.Resize((h, w), interpolation=transforms.InterpolationMode.BICUBIC),
         transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-        ############### Ten Crop
-        # transforms.TenCrop(224),
-        # transforms.Lambda(lambda crops: torch.stack(
-        #   [transforms.ToTensor()(crop)
-        #      for crop in crops]
-        # )),
-        # transforms.Lambda(lambda crops: torch.stack(
-        #   [transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])(crop)
-        #       for crop in crops]
-        # ))
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ]
 )
 
 if opt.PCB:
     data_transforms = transforms.Compose(
         [
-            transforms.Resize((384, 192), interpolation=3),
+            transforms.Resize(
+                (384, 192), interpolation=transforms.InterpolationMode.BICUBIC
+            ),
             transforms.ToTensor(),
             transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
         ]
     )
     h, w = 384, 192
 
-
-data_dir = test_dir
+debug_dir = f"{opt.test_dir}/debug"
 
 if opt.multi:
     image_datasets = {
-        x: datasets.ImageFolder(os.path.join(data_dir, x), data_transforms)
+        x: datasets.ImageFolder(os.path.join(opt.test_dir, x), data_transforms)
         for x in ["gallery", "query", "multi-query"]
     }
     dataloaders = {
@@ -189,7 +187,7 @@ if opt.multi:
     }
 else:
     image_datasets = {
-        x: datasets.ImageFolder(os.path.join(data_dir, x), data_transforms)
+        x: datasets.ImageFolder(os.path.join(opt.test_dir, x), data_transforms)
         for x in ["gallery", "query"]
     }
     dataloaders = {
@@ -200,10 +198,6 @@ else:
     }
 
     # ==== DEBUG ====
-    import json
-
-    debug_dir = f"{opt.test_dir}/debug"
-
     if os.path.exists(debug_dir):
         shutil.rmtree(debug_dir)
     os.makedirs(debug_dir)
@@ -223,7 +217,7 @@ use_gpu = torch.cuda.is_available()
 # Load model
 # ---------------------------
 def load_network(network):
-    save_path = os.path.join("./model", name, "net_%s.pth" % opt.which_epoch)
+    save_path = os.path.join("./model", name, f"net_{opt.which_epoch}.pth")
     network.load_state_dict(torch.load(save_path))
     return network
 
@@ -368,22 +362,12 @@ else:
 if opt.PCB:
     model_structure = PCB(opt.nclasses)
 
-# if opt.fp16:
-#    model_structure = network_to_half(model_structure)
-
 model = load_network(model_structure)
 
 # Remove the final fc layer and classifier layer
 if opt.PCB:
-    # if opt.fp16:
-    #    model = PCB_test(model[1])
-    # else:
     model = PCB_test(model)
 else:
-    # if opt.fp16:
-    # model[1].model.fc = nn.Sequential()
-    # model[1].classifier = nn.Sequential()
-    # else:
     model.classifier.classifier = nn.Sequential()
 
 # Change to test mode
@@ -392,8 +376,10 @@ if use_gpu:
     model = model.cuda()
 
 
-print(
-    "Here I fuse conv and bn for faster inference, and it does not work for transformers. Comment out this following line if you do not want to fuse conv&bn."
+logging.warning(
+    "Here I fuse conv and bn for faster inference, "
+    "and it does not work for transformers. Comment "
+    "out this following line if you do not want to fuse conv&bn."
 )
 model = fuse_all_conv_bn(model)
 
@@ -412,10 +398,10 @@ with torch.no_grad():
     query_feature = extract_feature(model, dataloaders["query"])
     if opt.multi:
         mquery_feature = extract_feature(model, dataloaders["multi-query"])
+
 time_elapsed = time.time() - since
-print(
-    "Training complete in {:.0f}m {:.2f}s".format(time_elapsed // 60, time_elapsed % 60)
-)
+logging.info(f"Training complete in {time_elapsed // 60:.0f}m {time_elapsed % 60:.2f}s")
+
 # Save to Matlab for check
 result = {
     "gallery_f": gallery_feature.numpy(),
@@ -428,21 +414,24 @@ result = {
 scipy.io.savemat("pytorch_result.mat", result)
 
 logging.info("Evaluating %s", opt.name)
-
-result = "./model/%s/result.txt" % opt.name
+result = f"./model/{opt.name}/result.txt"
 
 # save parser args to result.txt
 with open(result, "a", encoding="utf-8") as f:
     f.write(str(opt) + "\n")
 
+evaluation = evaluate_gpu.run(debug_dir=debug_dir)
 logging.info("Saving result to %s", result)
-os.system(f"python evaluate_gpu.py {debug_dir} | tee -a {result}")
+with open(result, "a", encoding="utf-8") as f:
+    f.write(str(evaluation) + "\n")
+
+# os.system(f"python evaluate_gpu.py {debug_dir} | tee -a {result}")
 
 
-if opt.multi:
-    result = {
-        "mquery_f": mquery_feature.numpy(),
-        "mquery_label": mquery_label,
-        "mquery_cam": mquery_cam,
-    }
-    scipy.io.savemat("multi_query.mat", result)
+# if opt.multi:
+#     result = {
+#         "mquery_f": mquery_feature.numpy(),
+#         "mquery_label": mquery_label,
+#         "mquery_cam": mquery_cam,
+#     }
+#     scipy.io.savemat("multi_query.mat", result)
