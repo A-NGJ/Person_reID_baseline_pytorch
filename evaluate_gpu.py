@@ -109,7 +109,9 @@ class Result:
         ax.legend()
 
         if save_dir:
-            fig.savefig(f"{save_dir}/results.png")
+            if not os.path.exists(save_dir):
+                os.mkdir(save_dir)
+            fig.savefig(f"{save_dir}/results_{self.dataset_name}.png")
         else:
             plt.show()
 

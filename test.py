@@ -318,6 +318,9 @@ def get_id(img_path):
         if camera is None:
             raise ValueError(f"Camera ID is not found in the filename: {filename}")
         camera = camera.group(1).lstrip("0")
+        if camera == "":
+            camera = 0
+
         # remove zero padding from label
         if dirname == "noise":  # TODO: use constant instead of string
             labels.append(-1)
@@ -333,6 +336,7 @@ def get_id(img_path):
                     f"Label is not an integer: {label} (filename: {filename})"
                 )
             label = labels.append(label)
+
         camera_id.append(int(camera))
     return camera_id, labels
 
@@ -441,7 +445,7 @@ with open(result, "a", encoding="utf-8") as f:
     f.write(str(evaluation.all_queries()) + "\n")
 
 evaluation.plot_curve(
-    save_dir=".",
+    save_dir=f"./model/{opt.name}/plots",
     markersize=2,
 )
 
