@@ -4,21 +4,120 @@ import logging
 from typing import (
     Any,
     Dict,
+    List,
 )
 import shutil
 import scipy.io
 import torch
+import matplotlib.pyplot as plt
 import numpy as np
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(message)s")
 
 
-#######################################################################
-# Evaluate
+class Result:
+    def __init__(self, results: dict, model_name: str = "", dataset_name: str = ""):
+        self.results = results
+        self.model_name = model_name
+        self.dataset_name = dataset_name
+
+    def all_queries(self):
+        return self.results[min(self.results.keys())]
+
+    def plot_curve(
+        self,
+        linewidth: float = 1.0,
+        markersize: float = 1.0,
+        save_dir: str = "",
+    ):
+        """
+        Plot results curve.
+        If save dir is provided, save the plot to the directory.
+        Otherwise, show the plot.
+
+        Parameters
+        ----------
+        save_dir : str
+            The directory to save the plot.
+        """
+        plot_kwargs = {
+            "linewidth": linewidth,
+            "markersize": markersize,
+        }
+
+        # define subplots with 1920x1080 resolution
+        fig, ax = plt.subplots(figsize=(19.2, 10.8))
+        ax.plot(
+            self.results.keys(),
+            [self.results[k]["mAP"] for k in self.results.keys()],
+            "o-",
+            label="mAP",
+            **plot_kwargs,
+        )
+        ax.plot(
+            self.results.keys(),
+            [self.results[k]["rank10"] for k in self.results.keys()],
+            "o-",
+            label="Rank-10",
+            **plot_kwargs,
+        )
+        ax.plot(
+            self.results.keys(),
+            [self.results[k]["rank5"] for k in self.results.keys()],
+            "o-",
+            label="Rank-5",
+            **plot_kwargs,
+        )
+        ax.plot(
+            self.results.keys(),
+            [self.results[k]["rank1"] for k in self.results.keys()],
+            "o-",
+            label="Rank-1",
+            **plot_kwargs,
+        )
+
+        counts = np.array([self.results[k]["count"] for k in self.results.keys()])
+        counts_max = counts.max()
+        # normalize counts
+        counts = counts / counts_max
+        # Plot on second axis the number of images per threshold
+        ax.plot(
+            self.results.keys(),
+            counts,
+            "--",
+            label=f"Normalized count. Max value: {counts_max:.2f}",
+            alpha=0.5,
+            linewidth=2.0,
+            color="black",
+        )
+
+        ax.set_xlabel("Image size threshold")
+        ax.set_ylabel("Count")
+        if self.model_name and self.dataset_name:
+            ax.set_title(
+                f"Evaluation results of {self.model_name} on {self.dataset_name}"
+            )
+        else:
+            ax.set_title("Evaluation results")
+        # Set the minor ticks positions on y-axis
+        minor_ticks = np.arange(0, 1, 0.05)
+        ax.set_yticks(minor_ticks, minor=True)
+        # Set grid on minor ticks
+        ax.grid(which="minor", alpha=0.2)
+
+        ax.grid()
+        ax.legend()
+
+        if save_dir:
+            fig.savefig(f"{save_dir}/results.png")
+        else:
+            plt.show()
+
+
 def evaluate(
     results: dict,
     query_id: int,
-    filenames: Dict[str, str],
+    filenames: Dict[str, List[Dict[str, Any]]],
     debug_dir: str = "",
 ):
     """
@@ -79,7 +178,7 @@ def compute_map(
     index: np.ndarray,
     good_index: np.ndarray,
     junk_index: np.ndarray,
-    filenames: Dict[str, str],
+    filenames: Dict[str, List[Dict[str, Any]]],
     debug_dir: str,
 ):
     avg_precision = 0
@@ -97,13 +196,11 @@ def compute_map(
     mask = np.in1d(index, good_index)
     rows_good = np.argwhere(mask).flatten()
 
-    # ===== DEBUG =====
     for i, idx in enumerate(index[:10]):
         shutil.copy(
-            filenames[str(idx)],
-            f"{debug_dir}/{i}r{rows_good[0]}_{filenames[str(idx)].split('/')[-1]}",
+            filenames["gallery"][idx]["path"],
+            f"{debug_dir}/{i}r{rows_good[0]}_{filenames['gallery'][idx]['path'].split('/')[-1]}",
         )
-    # =================
 
     cmc[rows_good[0] :] = 1
     for i in range(ngood):
@@ -150,33 +247,52 @@ def load_results(results_file: str = "pytorch_result.mat") -> Dict[str, Any]:
 def run(results_file: str = "pytorch_result.mat", debug_dir: str = ""):
     results = load_results(results_file)
 
-    filenames = {}  # dictionary of all gallery images
+    filenames = {}  # list of gallery frames and their resolutions
     if debug_dir:
         with open(f"{debug_dir}/filenames.json", "r", encoding="utf-8") as rfile:
             filenames = json.load(rfile)
 
     logging.info(f"Query feature shape: {results['query_feature'].shape}")
-    cmc = torch.IntTensor(len(results["gallery_label"])).zero_()
-    avg_precision = 0.0
-    for i, _ in enumerate(results["query_label"]):
-        ap_tmp, cmc_tmp = evaluate(results, i, filenames, debug_dir)
-        if cmc_tmp[0] == -1:
-            continue
-        cmc += cmc_tmp
-        avg_precision += ap_tmp
-
-    cmc = cmc.float()
-    cmc /= len(results["query_label"])  # average CMC
-    print(
-        f"Rank@1:{cmc[0]} Rank@5:{cmc[4]} Rank@10:{cmc[9]} "
-        f"mAP:{avg_precision / len(results['query_label'])}"
+    # get sorted resolution list in ascending order
+    resolution_list = sorted(
+        list(set(filename["resolution"] for filename in filenames["query"]))
     )
-    return {
-        "rank1": float(cmc[0]),
-        "rank5": float(cmc[4]),
-        "rank10": float(cmc[9]),
-        "mAP": avg_precision / len(results["query_label"]),
-    }
+    evaluation_results = {}
+    for resolution_threshold in np.linspace(
+        resolution_list[0], resolution_list[-1], num=100, dtype=int
+    ):
+        # filter out query labels with resolution less than threshold
+        query_index = np.argwhere(
+            np.array([file_["resolution"] for file_ in filenames["query"]])
+            >= resolution_threshold
+        ).flatten()
+        query_labels = results["query_label"][query_index]
+        if len(query_labels) == 1:
+            print()
+
+        cmc = torch.IntTensor(len(results["gallery_label"])).zero_()
+        avg_precision = 0.0
+        for i, _ in enumerate(query_labels):
+            ap_tmp, cmc_tmp = evaluate(results, i, filenames, debug_dir)
+            if cmc_tmp[0] == -1:
+                continue
+            cmc += cmc_tmp
+            avg_precision += ap_tmp
+
+        cmc = cmc.float()
+        cmc /= len(query_labels)  # average CMC
+        logging.info(
+            f"Rank@1:{cmc[0]} Rank@5:{cmc[4]} Rank@10:{cmc[9]} "
+            f"mAP:{avg_precision / len(query_labels)}"
+        )
+        evaluation_results[resolution_threshold] = {
+            "rank1": float(cmc[0]),
+            "rank5": float(cmc[4]),
+            "rank10": float(cmc[9]),
+            "mAP": avg_precision / len(query_labels),
+            "count": len(query_labels),
+        }
+    return Result(evaluation_results)
 
 
 # multiple-query
@@ -206,3 +322,6 @@ def run(results_file: str = "pytorch_result.mat", debug_dir: str = ""):
 #     print(
 #         f"Rank@1:{CMC[0]} Rank@5:{CMC[4]} Rank@10:{CMC[9]} mAP:{avg_precision / len(query_label)}"
 #     )
+
+if __name__ == "__main__":
+    run(debug_dir="/home/aleksandernagaj/Milestone/data/Milestone/pytorch/debug")

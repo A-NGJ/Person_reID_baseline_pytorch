@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import time
+from PIL import Image
 
 import torch
 import torch.utils.data
@@ -81,6 +82,9 @@ parser.add_argument("--fp16", action="store_true", help="use fp16.")
 parser.add_argument("--ibn", action="store_true", help="use ibn.")
 parser.add_argument(
     "--ms", default="1", type=str, help="multiple_scale: e.g. 1 1,1.1  1,1.1,1.2"
+)
+parser.add_argument(
+    "--dataset-name", type=str, help="Dataset name. So far used only for plot title"
 )
 
 opt = parser.parse_args()
@@ -203,11 +207,19 @@ else:
     os.makedirs(debug_dir)
 
     with open(f"{debug_dir}/filenames.json", "w", encoding="utf-8") as rfile:
-        json.dump(
-            {i: img[0] for i, img in enumerate(image_datasets["gallery"].imgs)},
-            rfile,
-            indent=4,
-        )
+        # save filenames with their total resolution
+        images = {}
+        for data_set in ["gallery", "query"]:
+            images[data_set] = []
+            for filename, _ in image_datasets[data_set].imgs:
+                image = Image.open(filename)
+                images[data_set].append(
+                    {
+                        "path": filename,
+                        "resolution": image.size[0] * image.size[1],
+                    }
+                )
+        json.dump(images, rfile, indent=4)
     # ===============
 class_names = image_datasets["query"].classes
 use_gpu = torch.cuda.is_available()
@@ -421,12 +433,17 @@ with open(result, "a", encoding="utf-8") as f:
     f.write(str(opt) + "\n")
 
 evaluation = evaluate_gpu.run(debug_dir=debug_dir)
+evaluation.model_name = opt.name
+evaluation.dataset_name = opt.dataset_name
+
 logging.info("Saving result to %s", result)
 with open(result, "a", encoding="utf-8") as f:
-    f.write(str(evaluation) + "\n")
+    f.write(str(evaluation.all_queries()) + "\n")
 
-# os.system(f"python evaluate_gpu.py {debug_dir} | tee -a {result}")
-
+evaluation.plot_curve(
+    save_dir=".",
+    markersize=2,
+)
 
 # if opt.multi:
 #     result = {
