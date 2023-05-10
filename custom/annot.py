@@ -241,6 +241,7 @@ def prepare_train_test_set(
     dst: Path,
     train_size: float = 0.7,
     test_size: float = 0.3,
+    fixed_val_size: int = 0,
 ):
     """
     Prepare directory structure for running reID.
@@ -303,6 +304,18 @@ def prepare_train_test_set(
     query_img_by_person_id_dict = {}
     for person_id, camera_id in test_img_by_person_id_dict.items():
         query_img_by_person_id_dict[person_id] = {}
+        if fixed_val_size > 0:
+            # if fixed val size is set, pick that many samples among all cameras
+            samples = [
+                (camera, im) for camera, imgs in camera_id.items() for im in imgs
+            ]
+            samples = random.sample(samples, fixed_val_size)
+            for camera, im in samples:
+                index = camera_id[camera].index(im)
+                query_img_by_person_id_dict[person_id].setdefault(camera, []).append(im)
+                del test_img_by_person_id_dict[person_id][camera][index]
+            continue
+
         for camera_id, imgs in camera_id.items():
             if len(imgs) > 1:
                 # dont pick a sample if there is only one image in that camera
@@ -590,9 +603,10 @@ if __name__ == "__main__":
         "--train-size", type=float, default=0.7, help="Train set size"
     )
     parser_prep.add_argument(
-        "--val",
-        action="store_true",
-        help="Create validation set",
+        "--val-size",
+        type=int,
+        default=0,
+        help="Fixed validation set size for each id (if 0, size is determined by number of cameras for each id in gallery set)",
     )
 
     # Merge data sets subparser
@@ -643,6 +657,7 @@ if __name__ == "__main__":
             dest_path,
             train_size=args.train_size,
             test_size=args.test_size,
+            fixed_val_size=args.val_size,
         )
     elif args.mode == "merge":
         merge_datasets(*source_paths, dest=dest_path)
