@@ -268,12 +268,15 @@ def prepare_train_test_set(
     img_by_person_id_dict = img_by_person_id(src, "*.jpg")
 
     # get the list of all person ids and noise ids
-    noise_ids = [id_ for id_ in img_by_person_id_dict.keys() if id_ < 1]
-    person_ids = [id_ for id_ in img_by_person_id_dict.keys() if id_ > 0]
+    noise_ids = [id_ for id_ in img_by_person_id_dict.keys() if id_ < 0]
+    person_ids = [id_ for id_ in img_by_person_id_dict.keys() if id_ >= 0]
     # get the train and test indices
     if test_size == 1:
         train_indices = []
         test_indices = person_ids
+    elif train_size == 1:
+        train_indices = person_ids
+        test_indices = []
     else:
         train_indices, test_indices = train_test_split(
             person_ids, train_size=train_size, test_size=test_size
@@ -432,12 +435,13 @@ def img_by_person_id(
     for file_ in src.glob(glob):
         file_ = Path(file_)
         person_id, camera_id = file_.name.split("_")[:2]
-        person_id = person_id.lstrip("0")
-        if person_id == "":
-            # Person ID is 0
-            person_id = 0
-        else:
-            person_id = int(person_id)
+        # person_id = person_id.lstrip("0")
+        # if person_id == "":
+        #     # Person ID is 0
+        #     person_id = 0
+        # else:
+        #     person_id = int(person_id)
+        person_id = int(person_id)
         camera_id = re.search(r"(?<=c)(\d+)", camera_id)
         if camera_id is None:
             raise AttributeError(f"Could not parse camera ID from {file_}")

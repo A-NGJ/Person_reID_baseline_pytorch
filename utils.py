@@ -2,12 +2,12 @@ import torch.nn as nn
 from torch.nn.utils import fuse_conv_bn_eval
 
 
-def fuse_all_conv_bn(model):
+def fuse_all_conv_bn(model: nn.Module) -> nn.Module:
     stack = []
     for name, module in model.named_children():
         if list(module.named_children()):
             fuse_all_conv_bn(module)
-            
+
         if isinstance(module, nn.BatchNorm2d):
             if not stack:
                 continue

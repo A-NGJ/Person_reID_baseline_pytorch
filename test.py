@@ -196,7 +196,7 @@ else:
     }
     dataloaders = {
         x: torch.utils.data.DataLoader(
-            image_datasets[x], batch_size=opt.batchsize, shuffle=False, num_workers=16
+            image_datasets[x], batch_size=opt.batchsize, shuffle=True, num_workers=16
         )
         for x in ["gallery", "query"]
     }
