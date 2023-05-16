@@ -2,16 +2,21 @@ from argparse import (
     ArgumentParser,
     Namespace,
 )
+from collections import defaultdict
 import logging
 from pathlib import Path
+import shutil
 from typing import Tuple
 from tqdm import tqdm
 
+import matplotlib.pyplot as plt
+import numpy as np
 from scipy.cluster.hierarchy import (
     linkage,
     fcluster,
 )
 from scipy.spatial.distance import squareform
+from sklearn.metrics import silhouette_score
 import torch
 from torch.autograd import Variable
 from torch.utils.data import DataLoader
@@ -64,12 +69,10 @@ def load_network(path: Path, device: torch.device):
     return network
 
 
-def extract_features(
-    network, dataloader, device: torch.device
-) -> Tuple[torch.FloatTensor, torch.Tensor]:
+def extract_features(network, dataloader, device: torch.device) -> torch.FloatTensor:
     linear_size = 512
     features = torch.FloatTensor(len(dataloader.dataset), linear_size)
-    label_tensor = torch.Tensor(len(dataloader.dataset))
+    # label_tensor = torch.Tensor(len(dataloader.dataset))
 
     for iter, (images, labels) in tqdm(enumerate(dataloader), total=len(dataloader)):
         batch_features = (
@@ -92,46 +95,23 @@ def extract_features(
         start = iter * dataloader.batch_size
         end = min((iter + 1) * dataloader.batch_size, len(dataloader.dataset))
         features[start:end, :] = batch_features
-        label_tensor[start:end] = labels
+        # label_tensor[start:end] = labels
 
-    return features, label_tensor
+    return features
 
 
-def cluster_ids(features: torch.FloatTensor) -> torch.Tensor:
+def cluster_ids(features: torch.FloatTensor, threshold: float) -> torch.Tensor:
     # Calculate cosine similarity
     similarity = torch.mm(features, features.t())
-    print(similarity[0, :10])
 
     distance_matrix = 1 - similarity
     condensed_distance_matrix = squareform(distance_matrix, checks=False)
     # Perform hierarchical clustering
     linkage_matrix = linkage(condensed_distance_matrix, method="average")
-    cluster_labels = fcluster(linkage_matrix, 0.3, criterion="distance")
-    print("Unique labels:", len(set(cluster_labels)))
+
+    cluster_labels = fcluster(linkage_matrix, threshold, criterion="distance")
 
     return torch.Tensor(cluster_labels)
-
-
-def similarity_score(labels: torch.Tensor, gt_labels: torch.Tensor) -> float:
-    """
-    Calculate similarity score between predicted labels and ground truth labels.
-    """
-
-    def normalize_labels(labels: torch.Tensor) -> torch.Tensor:
-        """
-        Normalize labels so that they start from 0 and are consecutive.
-        """
-        unique_labels = torch.unique(labels)
-        label_map = {label.item(): i for i, label in enumerate(unique_labels)}
-        return torch.Tensor([label_map[label.item()] for label in labels])
-
-    labels = normalize_labels(labels)
-    gt_labels = normalize_labels(gt_labels)
-
-    # Calculate similarity score
-    score = torch.sum(labels == gt_labels).item() / len(labels)
-
-    return score
 
 
 def main(args: Namespace):
@@ -146,12 +126,38 @@ def main(args: Namespace):
     network = load_network(args.model_path, device)
     with torch.no_grad():
         logging.info("Extracting features")
-        features, gt_labels = extract_features(network, dataloader, device)
+        features = extract_features(network, dataloader, device)
 
     logging.info("Clustering ids")
-    ids = cluster_ids(features)
-    score = similarity_score(ids, gt_labels)
-    print(score)
+    max_silhouette = -1.0
+    best_threshold = 0.0
+    for threshold in np.arange(0.0, 1.0, 0.01):
+        cluster_labels = cluster_ids(features, threshold)
+        try:
+            silhouette = silhouette_score(features.numpy(), cluster_labels)
+        except ValueError:
+            continue
+        if silhouette > max_silhouette:
+            max_silhouette = silhouette
+            best_threshold = threshold
+
+    logging.info(f"Best threshold: {best_threshold:.2f}")
+    cluster_labels = cluster_ids(features, best_threshold)
+    logging.info(f"Unique cluster labels: {len(np.unique(cluster_labels))}")
+
+    logging.info("Saving clusters")
+    clusters = [[] for _ in range(len(np.unique(cluster_labels)))]
+    for i, label in enumerate(cluster_labels):
+        clusters[int(label) - 1].append(dataloader.dataset.imgs[i][0])
+
+    if (args.data_path / "clusters").exists():
+        shutil.rmtree(args.data_path / "clusters")
+    # save clusters
+    for i, cluster in enumerate(clusters):
+        cluster_path = args.data_path / "clusters" / f"cluster_{i}"
+        cluster_path.mkdir(parents=True, exist_ok=True)
+        for image_path in cluster:
+            shutil.copy(image_path, cluster_path)
 
 
 if __name__ == "__main__":
