@@ -79,42 +79,47 @@ class ClassBlock(nn.Module):
     def forward(self, x):
         x = self.add_block(x)
         if self.return_f:
-            f = x
-            x = self.classifier(x)
-            return [x, f]
-        else:
-            x = self.classifier(x)
             return x
+        x = self.classifier(x)
+        return x
 
 
 # Define the ResNet50-based Model
-class ft_net(nn.Module):
+class FtNet(nn.Module):
     def __init__(
         self,
         class_num: int = 751,
         droprate: float = 0.5,
         stride: int = 2,
-        circle: bool = False,
-        ibn: bool = False,
+        return_f: bool = False,
         linear_num: int = 512,
     ):
+        """
+        Class for ResNet50-based Model
+
+        Parameters
+        ----------
+        class_num : int, optional
+            Number of classes, by default 751
+        droprate : float, optional
+            Dropout rate, by default 0.5
+        stride : int, optional
+            Stride of the last conv layer, by default 2
+        return_f : bool, optional
+            Whether to return the feature before the classifier, by default False
+        linear_num : int, optional
+            Number of neurons in the last fc layer, by default 512
+        """
         super().__init__()
         model_ft = models.resnet50(weights=ResNet50_Weights.DEFAULT)
-        # remove last fc layer
-        # model_ft = nn.Sequential(*list(model_ft.children())[:-1])
-        if ibn:
-            model_ft = torch.hub.load(
-                "XingangPan/IBN-Net", "resnet50_ibn_a", pretrained=True
-            )
         # avg pooling to global pooling
         if stride == 1:
             model_ft.layer4[0].downsample[0].stride = (1, 1)
             model_ft.layer4[0].conv2.stride = (1, 1)
         model_ft.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.model = model_ft
-        self.circle = circle
         self.classifier = ClassBlock(
-            2048, class_num, droprate, linear=linear_num, return_f=circle
+            2048, class_num, droprate, linear=linear_num, return_f=return_f
         )
 
     def forward(self, x):

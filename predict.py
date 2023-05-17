@@ -2,14 +2,15 @@ from argparse import (
     ArgumentParser,
     Namespace,
 )
-from collections import defaultdict
 import logging
 from pathlib import Path
 import shutil
-from typing import Tuple
-from tqdm import tqdm
+from typing import (
+    List,
+    Tuple,
+)
 
-import matplotlib.pyplot as plt
+from tqdm import tqdm
 import numpy as np
 from scipy.cluster.hierarchy import (
     linkage,
@@ -25,7 +26,8 @@ from torchvision import (
     transforms,
 )
 
-from model import ft_net
+from datasets.datasets import ReIDImageDataset
+from model import FtNet
 from utils import fuse_all_conv_bn
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -45,20 +47,20 @@ def get_data_loader(data_path: Path, batch_size: int = 32) -> DataLoader:
         ]
     )
 
-    image_dataset = datasets.ImageFolder(str(data_path), data_transforms)
+    image_dataset = ReIDImageDataset(str(data_path), data_transforms)
     return DataLoader(
         image_dataset, batch_size=batch_size, shuffle=False, num_workers=16
     )
 
 
 def load_network(path: Path, device: torch.device):
-    network = ft_net(class_num=4042)
+    network = FtNet(class_num=4042, return_f=True)
     network.load_state_dict(torch.load(path))
     # remove final resnet50 fc layer
-    del network.model.fc
+    # del network.model.fc
     # remove the final classifier layer
     # so network outputs feature vector of size 512
-    network.classifier.classifier = torch.nn.Sequential()
+    # network.classifier.classifier = torch.nn.Sequential()
     del network.classifier.add_block[1:]
 
     network = network.eval()
@@ -69,12 +71,19 @@ def load_network(path: Path, device: torch.device):
     return network
 
 
-def extract_features(network, dataloader, device: torch.device) -> torch.FloatTensor:
+def extract_features(
+    network, dataloader, device: torch.device
+) -> Tuple[torch.FloatTensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     linear_size = 512
-    features = torch.FloatTensor(len(dataloader.dataset), linear_size)
-    # label_tensor = torch.Tensor(len(dataloader.dataset))
+    data_len = len(dataloader.dataset)
+    features = torch.FloatTensor(data_len, linear_size)
+    label_tensor = torch.Tensor(data_len)
+    camera_tensor = torch.Tensor(data_len)
+    sequence_tensor = torch.Tensor(data_len)
 
-    for iter, (images, labels) in tqdm(enumerate(dataloader), total=len(dataloader)):
+    for iter, (images, labels, camera_ids, sequence_nos) in tqdm(
+        enumerate(dataloader), total=len(dataloader)
+    ):
         batch_features = (
             torch.FloatTensor(images.size(0), linear_size).zero_().to(device)
         )
@@ -95,9 +104,11 @@ def extract_features(network, dataloader, device: torch.device) -> torch.FloatTe
         start = iter * dataloader.batch_size
         end = min((iter + 1) * dataloader.batch_size, len(dataloader.dataset))
         features[start:end, :] = batch_features
-        # label_tensor[start:end] = labels
+        label_tensor[start:end] = labels
+        camera_tensor[start:end] = camera_ids
+        sequence_tensor[start:end] = sequence_nos
 
-    return features
+    return features, label_tensor, camera_tensor, sequence_tensor
 
 
 def cluster_ids(features: torch.FloatTensor, threshold: float) -> torch.Tensor:
@@ -105,6 +116,7 @@ def cluster_ids(features: torch.FloatTensor, threshold: float) -> torch.Tensor:
     similarity = torch.mm(features, features.t())
 
     distance_matrix = 1 - similarity
+    # print(np.sum(distance_matrix.numpy() < 0))
     condensed_distance_matrix = squareform(distance_matrix, checks=False)
     # Perform hierarchical clustering
     linkage_matrix = linkage(condensed_distance_matrix, method="average")
@@ -112,6 +124,16 @@ def cluster_ids(features: torch.FloatTensor, threshold: float) -> torch.Tensor:
     cluster_labels = fcluster(linkage_matrix, threshold, criterion="distance")
 
     return torch.Tensor(cluster_labels)
+
+
+def save_clusters(clusters: List[List[Path]], data_path: Path):
+    if (data_path / "clusters").exists():
+        shutil.rmtree(data_path / "clusters")
+    for i, cluster in enumerate(clusters):
+        cluster_path = data_path / "clusters" / f"{i:0>4d}"
+        cluster_path.mkdir(parents=True, exist_ok=True)
+        for image_path in cluster:
+            shutil.copy(image_path, cluster_path)
 
 
 def main(args: Namespace):
@@ -132,9 +154,9 @@ def main(args: Namespace):
     max_silhouette = -1.0
     best_threshold = 0.0
     for threshold in np.arange(0.0, 1.0, 0.01):
-        cluster_labels = cluster_ids(features, threshold)
+        cluster_labels = cluster_ids(features[0], threshold)
         try:
-            silhouette = silhouette_score(features.numpy(), cluster_labels)
+            silhouette = silhouette_score(features[0].numpy(), cluster_labels)
         except ValueError:
             continue
         if silhouette > max_silhouette:
@@ -142,22 +164,16 @@ def main(args: Namespace):
             best_threshold = threshold
 
     logging.info(f"Best threshold: {best_threshold:.2f}")
-    cluster_labels = cluster_ids(features, best_threshold)
+    cluster_labels = cluster_ids(features[0], best_threshold)
     logging.info(f"Unique cluster labels: {len(np.unique(cluster_labels))}")
 
-    logging.info("Saving clusters")
-    clusters = [[] for _ in range(len(np.unique(cluster_labels)))]
-    for i, label in enumerate(cluster_labels):
-        clusters[int(label) - 1].append(dataloader.dataset.imgs[i][0])
+    logging.info("Saving cluster info")
+    print(features[2])
+    # clusters = [[] for _ in range(len(np.unique(cluster_labels)))]
+    # for i, label in enumerate(cluster_labels):
+    #     clusters[int(label) - 1].append(dataloader.dataset.imgs[i][0])
 
-    if (args.data_path / "clusters").exists():
-        shutil.rmtree(args.data_path / "clusters")
-    # save clusters
-    for i, cluster in enumerate(clusters):
-        cluster_path = args.data_path / "clusters" / f"cluster_{i}"
-        cluster_path.mkdir(parents=True, exist_ok=True)
-        for image_path in cluster:
-            shutil.copy(image_path, cluster_path)
+    # save_clusters(clusters, args.data_path)
 
 
 if __name__ == "__main__":
