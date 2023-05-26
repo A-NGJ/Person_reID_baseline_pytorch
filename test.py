@@ -11,6 +11,7 @@ import re
 import shutil
 import time
 from PIL import Image
+from tqdm import tqdm
 
 import torch
 import torch.utils.data
@@ -23,15 +24,11 @@ from torch.backends import cudnn
 import numpy as np
 
 # import torchvision
-from torchvision import (
-    datasets,
-    # models,
-    transforms,
-)
+from torchvision import transforms
 import scipy.io
 import yaml
 from model import (
-    ft_net,
+    FtNet,
     ft_net_dense,
     ft_net_hr,
     ft_net_swin,
@@ -45,7 +42,11 @@ from model import (
 from utils import fuse_all_conv_bn
 import evaluate_gpu
 
+from datasets.datasets import DataLoaderFactory
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(message)s")
+WIDTH: int = 128
+HEIGHT: int = 256
 
 # fp16
 try:
@@ -178,50 +179,58 @@ if opt.PCB:
 
 debug_dir = f"{opt.test_dir}/debug"
 
-if opt.multi:
-    image_datasets = {
-        x: datasets.ImageFolder(os.path.join(opt.test_dir, x), data_transforms)
-        for x in ["gallery", "query", "multi-query"]
-    }
-    dataloaders = {
-        x: torch.utils.data.DataLoader(
-            image_datasets[x], batch_size=opt.batchsize, shuffle=False, num_workers=16
-        )
-        for x in ["gallery", "query", "multi-query"]
-    }
-else:
-    image_datasets = {
-        x: datasets.ImageFolder(os.path.join(opt.test_dir, x), data_transforms)
-        for x in ["gallery", "query"]
-    }
-    dataloaders = {
-        x: torch.utils.data.DataLoader(
-            image_datasets[x], batch_size=opt.batchsize, shuffle=True, num_workers=16
-        )
-        for x in ["gallery", "query"]
-    }
+# if opt.multi:
+#     image_datasets = {
+#         x: datasets.ImageFolder(os.path.join(opt.test_dir, x), data_transforms)
+#         for x in ["gallery", "query", "multi-query"]
+#     }
+#     dataloaders = {
+#         x: torch.utils.data.DataLoader(
+#             image_datasets[x], batch_size=opt.batchsize, shuffle=False, num_workers=16
+#         )
+#         for x in ["gallery", "query", "multi-query"]
+#     }
+# else:
+#     image_datasets = {
+#         x: datasets.ImageFolder(os.path.join(opt.test_dir, x), data_transforms)
+#         for x in ["gallery", "query"]
+#     }
+# dataloaders = {
+#     x: torch.utils.data.DataLoader(
+#         image_datasets[x], batch_size=opt.batchsize, shuffle=True, num_workers=16
+#     )
+#     for x in ["gallery", "query"]
+# }
+dataloaders = {
+    x: DataLoaderFactory(WIDTH, HEIGHT).get(
+        "reid",
+        os.path.join(opt.test_dir, x),
+        "test",
+    )
+    for x in ["gallery", "query"]
+}
 
-    # ==== DEBUG ====
-    if os.path.exists(debug_dir):
-        shutil.rmtree(debug_dir)
-    os.makedirs(debug_dir)
+# ==== DEBUG ====
+if os.path.exists(debug_dir):
+    shutil.rmtree(debug_dir)
+os.makedirs(debug_dir)
 
-    with open(f"{debug_dir}/filenames.json", "w", encoding="utf-8") as rfile:
-        # save filenames with their total resolution
-        images = {}
-        for data_set in ["gallery", "query"]:
-            images[data_set] = []
-            for filename, _ in image_datasets[data_set].imgs:
-                image = Image.open(filename)
-                images[data_set].append(
-                    {
-                        "path": filename,
-                        "resolution": image.size[0] * image.size[1],
-                    }
-                )
-        json.dump(images, rfile, indent=4)
-    # ===============
-class_names = image_datasets["query"].classes
+with open(f"{debug_dir}/filenames.json", "w", encoding="utf-8") as rfile:
+    # save filenames with their total resolution
+    images = {}
+    for data_set in ["gallery", "query"]:
+        images[data_set] = []
+        for filename, _ in dataloaders[data_set].dataset.imgs:
+            image = Image.open(filename)
+            images[data_set].append(
+                {
+                    "path": filename,
+                    "resolution": image.size[0] * image.size[1],
+                }
+            )
+    json.dump(images, rfile, indent=4)
+# ===============
+class_names = dataloaders["query"].dataset.classes
 use_gpu = torch.cuda.is_available()
 
 
@@ -248,7 +257,10 @@ def fliplr(img):
 
 
 def extract_feature(model, dataloaders):
-    # features = torch.FloatTensor()
+    data_len = len(dataloaders.dataset)
+    features = torch.FloatTensor(data_len, opt.linear_num)
+    labels = torch.Tensor(data_len)
+    cameras = torch.Tensor(data_len)
     count = 0
     if opt.linear_num <= 0:
         if opt.use_swin or opt.use_swinv2 or opt.use_dense or opt.use_convnext:
@@ -260,15 +272,20 @@ def extract_feature(model, dataloaders):
         else:
             opt.linear_num = 2048
 
-    for iter, data in enumerate(dataloaders):
-        img, label = data
-        n, c, h, w = img.size()
-        count += n
-        print(count)
-        ff = torch.FloatTensor(n, opt.linear_num).zero_().cuda()
+    for iter, data in tqdm(
+        enumerate(dataloaders),
+        total=len(dataloaders),
+        desc="Extracting features batch",
+    ):
+        img = data["image"]
+        batch_size: int = img.size(0)
+        count += batch_size
+        ff = torch.FloatTensor(batch_size, opt.linear_num).zero_().cuda()
 
         if opt.PCB:
-            ff = torch.FloatTensor(n, 2048, 6).zero_().cuda()  # we have six parts
+            ff = (
+                torch.FloatTensor(batch_size, 2048, 6).zero_().cuda()
+            )  # we have six parts
 
         for i in range(2):
             if i == 1:
@@ -303,7 +320,10 @@ def extract_feature(model, dataloaders):
         start = iter * opt.batchsize
         end = min((iter + 1) * opt.batchsize, len(dataloaders.dataset))
         features[start:end, :] = ff
-    return features
+        labels[start:end] = data["label"]
+        cameras[start:end] = data["camera"]
+
+    return features, labels, cameras
 
 
 def get_id(img_path):
@@ -341,15 +361,12 @@ def get_id(img_path):
     return camera_id, labels
 
 
-gallery_path = image_datasets["gallery"].imgs
-query_path = image_datasets["query"].imgs
+gallery_path = dataloaders["gallery"].dataset.imgs
+query_path = dataloaders["query"].dataset.imgs
 
-gallery_cam, gallery_label = get_id(gallery_path)
-query_cam, query_label = get_id(query_path)
+# gallery_cam, gallery_label = get_id(gallery_path)
+# query_cam, query_label = get_id(query_path)
 
-if opt.multi:
-    mquery_path = image_datasets["multi-query"].imgs
-    mquery_cam, mquery_label = get_id(mquery_path)
 
 ######################################################################
 # Load Collected data Trained model
@@ -371,9 +388,7 @@ elif opt.use_efficient:
 elif opt.use_hr:
     model_structure = ft_net_hr(opt.nclasses, linear_num=opt.linear_num)
 else:
-    model_structure = ft_net(
-        opt.nclasses, stride=opt.stride, ibn=opt.ibn, linear_num=opt.linear_num
-    )
+    model_structure = FtNet(opt.nclasses, stride=opt.stride, linear_num=opt.linear_num)
 
 if opt.PCB:
     model_structure = PCB(opt.nclasses)
@@ -410,22 +425,24 @@ print(model)
 # Extract feature
 since = time.time()
 with torch.no_grad():
-    gallery_feature = extract_feature(model, dataloaders["gallery"])
-    query_feature = extract_feature(model, dataloaders["query"])
-    if opt.multi:
-        mquery_feature = extract_feature(model, dataloaders["multi-query"])
+    gallery_feature, gallery_label, gallery_cam = extract_feature(
+        model, dataloaders["gallery"]
+    )
+    query_feature, query_label, query_cam = extract_feature(model, dataloaders["query"])
 
 time_elapsed = time.time() - since
 logging.info(f"Training complete in {time_elapsed // 60:.0f}m {time_elapsed % 60:.2f}s")
 
+print("Query label:", query_label)
+print("Gallery label:", gallery_label)
 # Save to Matlab for check
 result = {
     "gallery_f": gallery_feature.numpy(),
-    "gallery_label": gallery_label,
-    "gallery_cam": gallery_cam,
+    "gallery_label": gallery_label.tolist(),
+    "gallery_cam": gallery_cam.tolist(),
     "query_f": query_feature.numpy(),
-    "query_label": query_label,
-    "query_cam": query_cam,
+    "query_label": query_label.tolist(),
+    "query_cam": query_cam.tolist(),
 }
 scipy.io.savemat("pytorch_result.mat", result)
 

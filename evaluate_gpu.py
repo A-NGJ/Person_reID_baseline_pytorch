@@ -12,6 +12,8 @@ import torch
 import matplotlib.pyplot as plt
 import numpy as np
 
+from datasets.datasets import DataLoaderFactory
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(message)s")
 
 

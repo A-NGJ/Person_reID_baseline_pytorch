@@ -1,7 +1,6 @@
 import argparse
 from dataclasses import dataclass
 from collections import defaultdict
-import itertools
 import random
 
 import logging
@@ -12,7 +11,6 @@ from pathlib import Path
 import re
 import shutil
 from typing import (
-    Dict,
     List,
     Optional,
     Tuple,
@@ -242,6 +240,7 @@ def prepare_train_test_set(
     train_size: float = 0.7,
     test_size: float = 0.3,
     fixed_val_size: int = 0,
+    extension: str = "jpg",
 ):
     """
     Prepare directory structure for running reID.
@@ -265,7 +264,7 @@ def prepare_train_test_set(
     if not dst.exists():
         dst.mkdir()
 
-    img_by_person_id_dict = img_by_person_id(src, "*.jpg")
+    img_by_person_id_dict = img_by_person_id(src, f"*.{extension}")
 
     # get the list of all person ids and noise ids
     noise_ids = [id_ for id_ in img_by_person_id_dict.keys() if id_ < 0]
@@ -557,7 +556,8 @@ def create_dataset(data: dict, dest: Path):
 
                     shutil.copy(
                         img,
-                        dst / f"{person_id:0>4d}_c{camera_id}_{sequence_n}{img.suffix}",
+                        dst
+                        / f"{person_id:0>4d}_c{camera_id:0>2d}_{sequence_n}{img.suffix}",
                     )
 
 
@@ -574,6 +574,11 @@ if __name__ == "__main__":
         "--clear",
         action="store_true",
         help="Clear destination directory beforehand",
+    )
+    parser.add_argument(
+        "--file-extension",
+        default="jpg",
+        help="File extension of images. Default: jpg",
     )
 
     subparsers = parser.add_subparsers(dest="mode")
@@ -662,6 +667,7 @@ if __name__ == "__main__":
             train_size=args.train_size,
             test_size=args.test_size,
             fixed_val_size=args.val_size,
+            extension=args.file_extension,
         )
     elif args.mode == "merge":
         merge_datasets(*source_paths, dest=dest_path)

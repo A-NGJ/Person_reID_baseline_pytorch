@@ -20,13 +20,8 @@ from scipy.spatial.distance import squareform
 from sklearn.metrics import silhouette_score
 import torch
 from torch.autograd import Variable
-from torch.utils.data import DataLoader
-from torchvision import (
-    datasets,
-    transforms,
-)
 
-from datasets.datasets import ReIDImageDataset
+from datasets.datasets import DataLoaderFactory
 from model import FtNet
 from utils import fuse_all_conv_bn
 
@@ -36,21 +31,21 @@ WIDTH = 128
 HEIGHT = 256
 
 
-def get_data_loader(data_path: Path, batch_size: int = 32) -> DataLoader:
-    data_transforms = transforms.Compose(
-        [
-            transforms.Resize(
-                (HEIGHT, WIDTH), interpolation=transforms.InterpolationMode.BICUBIC
-            ),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ]
-    )
+# def get_data_loader(data_path: Path, batch_size: int = 32) -> DataLoader:
+#     data_transforms = transforms.Compose(
+#         [
+#             transforms.Resize(
+#                 (HEIGHT, WIDTH), interpolation=transforms.InterpolationMode.BICUBIC
+#             ),
+#             transforms.ToTensor(),
+#             transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+#         ]
+#     )
 
-    image_dataset = ReIDImageDataset(str(data_path), data_transforms)
-    return DataLoader(
-        image_dataset, batch_size=batch_size, shuffle=False, num_workers=16
-    )
+#     image_dataset = ReIDImageDataset(str(data_path), data_transforms)
+#     return DataLoader(
+#         image_dataset, batch_size=batch_size, shuffle=False, num_workers=16
+#     )
 
 
 def load_network(path: Path, device: torch.device):
@@ -79,22 +74,22 @@ def extract_features(
     features = torch.FloatTensor(data_len, linear_size)
     label_tensor = torch.Tensor(data_len)
     camera_tensor = torch.Tensor(data_len)
-    sequence_tensor = torch.Tensor(data_len)
+    timestamp_tensor = torch.Tensor(data_len)
 
-    for iter, (images, labels, camera_ids, sequence_nos) in tqdm(
+    for iter, data in tqdm(
         enumerate(dataloader), total=len(dataloader)
     ):
         batch_features = (
-            torch.FloatTensor(images.size(0), linear_size).zero_().to(device)
+            torch.FloatTensor(data["image"].size(0), linear_size).zero_().to(device)
         )
 
         for i in range(2):
             if i == 1:
                 # flip image horizontally
-                images = images.index_select(
-                    3, torch.arange(images.size(3) - 1, -1, -1).long()
+                images = data["image"].index_select(
+                    3, torch.arange(data["image"].size(3) - 1, -1, -1).long()
                 )
-            outputs = network(Variable(images.to(device)))
+            outputs = network(Variable(data["image"].to(device)))
             batch_features += outputs
 
         # Normalization
@@ -104,11 +99,11 @@ def extract_features(
         start = iter * dataloader.batch_size
         end = min((iter + 1) * dataloader.batch_size, len(dataloader.dataset))
         features[start:end, :] = batch_features
-        label_tensor[start:end] = labels
-        camera_tensor[start:end] = camera_ids
-        sequence_tensor[start:end] = sequence_nos
+        label_tensor[start:end] = data["label"]
+        camera_tensor[start:end] = data["camera"]
+        timestamp_tensor[start:end] = data["timestamp"]
 
-    return features, label_tensor, camera_tensor, sequence_tensor
+    return features, label_tensor, camera_tensor, timestamp_tensor
 
 
 def cluster_ids(features: torch.FloatTensor, threshold: float) -> torch.Tensor:
@@ -142,7 +137,12 @@ def main(args: Namespace):
     logging.info(f"Using device: {device}")
 
     logging.info("Loading data")
-    dataloader = get_data_loader(args.data_path, args.batch_size)
+    # dataloader = DataLoaderFactory(HEIGHT, WIDTH).get("reid", args.data_path, "test")
+    dataloader = DataLoaderFactory(HEIGHT, WIDTH).get(
+        "context_video",
+        args.data_path,
+        "test",
+    )
 
     logging.info("Loading network")
     network = load_network(args.model_path, device)
@@ -153,7 +153,7 @@ def main(args: Namespace):
     logging.info("Clustering ids")
     max_silhouette = -1.0
     best_threshold = 0.0
-    for threshold in np.arange(0.0, 1.0, 0.01):
+    for threshold in np.arange(0.0, 1, 0.01):
         cluster_labels = cluster_ids(features[0], threshold)
         try:
             silhouette = silhouette_score(features[0].numpy(), cluster_labels)
@@ -168,12 +168,11 @@ def main(args: Namespace):
     logging.info(f"Unique cluster labels: {len(np.unique(cluster_labels))}")
 
     logging.info("Saving cluster info")
-    print(features[2])
-    # clusters = [[] for _ in range(len(np.unique(cluster_labels)))]
-    # for i, label in enumerate(cluster_labels):
-    #     clusters[int(label) - 1].append(dataloader.dataset.imgs[i][0])
+    clusters = [[] for _ in range(len(np.unique(cluster_labels)))]
+    for i, label in enumerate(cluster_labels):
+        clusters[int(label) - 1].append(dataloader.dataset.imgs[i][0])
 
-    # save_clusters(clusters, args.data_path)
+    save_clusters(clusters, args.data_path)
 
 
 if __name__ == "__main__":
