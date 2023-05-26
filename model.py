@@ -1,5 +1,5 @@
 import torch
-import torch.nn as nn
+from torch import nn
 from torch.nn import init
 from torch.autograd import Variable
 from torchvision import models

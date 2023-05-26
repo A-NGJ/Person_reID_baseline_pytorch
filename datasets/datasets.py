@@ -62,7 +62,7 @@ class ReIDImageDataset(Dataset):
             "image": image,
             "label": label,
             "camera": camera,
-            "timestamp": timestamp,
+            "timestamp": (timestamp,),
         }
 
 
@@ -81,6 +81,7 @@ class ContextVideoDataset(Dataset):
         self.classes = self.dataset.classes
         self.img_by_label = defaultdict(lambda: defaultdict(list))
         self.timestamp_by_label = defaultdict(lambda: defaultdict(list))
+        self.frames_by_label = defaultdict(lambda: defaultdict(list))
 
         for image, label in self.imgs:
             camera_id = re.search(r"c(\d+)", Path(image).name)
@@ -91,12 +92,13 @@ class ContextVideoDataset(Dataset):
             self.timestamp_by_label[label][camera_id].append(
                 int(Path(image).name.split(".")[0].split("_")[-1])
             )
+            self.frames_by_label[label][camera_id].append(image)
 
     def __len__(self):
         return len(self.dataset)
 
     def __getitem__(self, idx: int):
-        image_path, label = self.dataset.samples[idx]
+        image_path, _ = self.dataset.samples[idx]
         try:
             image = Image.open(image_path).convert("RGB")
         except OSError:
@@ -111,14 +113,23 @@ class ContextVideoDataset(Dataset):
         if camera is None:
             raise ValueError(f"Could not find camera id in {file_name}")
         camera = int(camera.group(1))
-        # timestamp = int(file_name.split(".")[0].split("_")[-1])
+        try:
+            label = int(file_name.split("_")[0])
+        except ValueError:
+            label = -1
 
         return {
             "image": image,
             "label": label,
             "camera": camera,
-            "timestamp_in": self.timestamp_by_label[label][camera][0],
-            "timestamp_out": self.timestamp_by_label[label][camera][-1],
+            "timestamp": (
+                self.timestamp_by_label[label][camera][0],
+                self.timestamp_by_label[label][camera][-1],
+            ),
+            "frames": (
+                self.frames_by_label[label][camera][0],
+                self.frames_by_label[label][camera][-1],
+            ),
         }
 
 

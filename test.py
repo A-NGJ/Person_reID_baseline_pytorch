@@ -47,44 +47,41 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(message)s")
 WIDTH: int = 128
 HEIGHT: int = 256
 
-# fp16
-try:
-    from apex.fp16_utils import *
-except ImportError:  # will be 3.x series
-    logging.warning(
-        "This is not an error. If you want to use low precision, i.e., fp16, "
-        "please install the apex with cuda support (https://github.com/NVIDIA/apex) "
-        "and update pytorch to 1.0"
-    )
 ######################################################################
 parser = argparse.ArgumentParser(description="Test")
 parser.add_argument(
-    "--gpu_ids", default="0", type=str, help="gpu_ids: e.g. 0  0,1,2  0,2"
+    "--gpu-ids", default="0", type=str, help="gpu_ids: e.g. 0  0,1,2  0,2"
 )
-parser.add_argument("--which_epoch", default="last", type=str, help="0,1,2,3...or last")
+parser.add_argument("--which-epoch", default="last", type=str, help="0,1,2,3...or last")
 parser.add_argument(
-    "--test_dir", default="../Market/pytorch", type=str, help="./test_data"
+    "--test-dir", default="../Market/pytorch", type=str, help="./test_data"
 )
 parser.add_argument("--name", default="ft_ResNet50", type=str, help="save model path")
 parser.add_argument("--batchsize", default=256, type=int, help="batchsize")
 parser.add_argument(
-    "--linear_num",
+    "--linear-num",
     default=512,
     type=int,
     help="feature dimension: 512 or default or 0 (linear=False)",
 )
-parser.add_argument("--use_dense", action="store_true", help="use densenet121")
-parser.add_argument("--use_efficient", action="store_true", help="use efficient-b4")
-parser.add_argument("--use_hr", action="store_true", help="use hr18 net")
+parser.add_argument("--use-dense", action="store_true", help="use densenet121")
+parser.add_argument("--use-efficient", action="store_true", help="use efficient-b4")
+parser.add_argument("--use-hr", action="store_true", help="use hr18 net")
 parser.add_argument("--PCB", action="store_true", help="use PCB")
 parser.add_argument("--multi", action="store_true", help="use multiple query")
 parser.add_argument("--fp16", action="store_true", help="use fp16.")
-parser.add_argument("--ibn", action="store_true", help="use ibn.")
 parser.add_argument(
     "--ms", default="1", type=str, help="multiple_scale: e.g. 1 1,1.1  1,1.1,1.2"
 )
 parser.add_argument(
     "--dataset-name", type=str, help="Dataset name. So far used only for plot title"
+)
+parser.add_argument(
+    "--dataloader",
+    type=str,
+    choices=["reid", "context_video"],
+    default="reid",
+    help="Dataloader name",
 )
 
 opt = parser.parse_args()
@@ -178,9 +175,10 @@ if opt.PCB:
 
 debug_dir = f"{opt.test_dir}/debug"
 
+# Initialize data loaders
 dataloaders = {
     x: DataLoaderFactory(HEIGHT, WIDTH).get(
-        "reid",
+        opt.dataloader,
         os.path.join(opt.test_dir, x),
         "test",
     )
@@ -300,12 +298,16 @@ def extract_feature(model, dataloaders):
         labels[start:end] = data["label"]
         cameras[start:end] = data["camera"]
 
-    return features, labels, cameras
+    return {
+        "features": features,
+        "labels": labels,
+        "cameras": cameras,
+    }
 
 
 ######################################################################
 # Load Collected data Trained model
-print("-------test-----------")
+print("=" * 20 + "test" + "=" * 20)
 if opt.use_dense:
     model_structure = ft_net_dense(
         opt.nclasses, stride=opt.stride, linear_num=opt.linear_num
@@ -342,11 +344,11 @@ if use_gpu:
     model = model.cuda()
 
 
-logging.warning(
-    "Here I fuse conv and bn for faster inference, "
-    "and it does not work for transformers. Comment "
-    "out this following line if you do not want to fuse conv&bn."
-)
+# logging.warning(
+#     "Here I fuse conv and bn for faster inference, "
+#     "and it does not work for transformers. Comment "
+#     "out this following line if you do not want to fuse conv&bn."
+# )
 model = fuse_all_conv_bn(model)
 
 # We can optionally trace the forward method with PyTorch JIT so it runs faster.
@@ -356,15 +358,14 @@ model = fuse_all_conv_bn(model)
 dummy_forward_input = torch.rand(opt.batchsize, 3, h, w).cuda()
 model = torch.jit.trace(model, dummy_forward_input)
 
-print(model)
 # Extract feature
 since = time.time()
 with torch.no_grad():
-    gallery_feature, gallery_label, gallery_cam = extract_feature(
+    gallery_data = extract_feature(
         model,
         dataloaders["gallery"],
     )
-    query_feature, query_label, query_cam = extract_feature(
+    query_data = extract_feature(
         model,
         dataloaders["query"],
     )
@@ -374,12 +375,12 @@ logging.info(f"Training complete in {time_elapsed // 60:.0f}m {time_elapsed % 60
 
 # Save to Matlab for check
 result = {
-    "gallery_f": gallery_feature.numpy(),
-    "gallery_label": gallery_label.tolist(),
-    "gallery_cam": gallery_cam.tolist(),
-    "query_f": query_feature.numpy(),
-    "query_label": query_label.tolist(),
-    "query_cam": query_cam.tolist(),
+    "gallery_f": gallery_data["features"].numpy(),
+    "gallery_label": gallery_data["labels"].tolist(),
+    "gallery_cam": gallery_data["cameras"].tolist(),
+    "query_f": query_data["features"].numpy(),
+    "query_label": query_data["labels"].tolist(),
+    "query_cam": query_data["cameras"].tolist(),
 }
 scipy.io.savemat("pytorch_result.mat", result)
 
