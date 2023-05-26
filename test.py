@@ -259,8 +259,8 @@ def fliplr(img):
 def extract_feature(model, dataloaders):
     data_len = len(dataloaders.dataset)
     features = torch.FloatTensor(data_len, opt.linear_num)
-    labels = torch.Tensor(data_len)
-    cameras = torch.Tensor(data_len)
+    labels = torch.IntTensor(data_len)
+    cameras = torch.IntTensor(data_len)
     count = 0
     if opt.linear_num <= 0:
         if opt.use_swin or opt.use_swinv2 or opt.use_dense or opt.use_convnext:
@@ -272,12 +272,11 @@ def extract_feature(model, dataloaders):
         else:
             opt.linear_num = 2048
 
-    for iter, data in tqdm(
+    for iter, (img, label, camera, timestamp) in tqdm(
         enumerate(dataloaders),
         total=len(dataloaders),
         desc="Extracting features batch",
     ):
-        img = data["image"]
         batch_size: int = img.size(0)
         count += batch_size
         ff = torch.FloatTensor(batch_size, opt.linear_num).zero_().cuda()
@@ -320,8 +319,8 @@ def extract_feature(model, dataloaders):
         start = iter * opt.batchsize
         end = min((iter + 1) * opt.batchsize, len(dataloaders.dataset))
         features[start:end, :] = ff
-        labels[start:end] = data["label"]
-        cameras[start:end] = data["camera"]
+        labels[start:end] = label
+        cameras[start:end] = camera
 
     return features, labels, cameras
 
@@ -364,8 +363,8 @@ def get_id(img_path):
 gallery_path = dataloaders["gallery"].dataset.imgs
 query_path = dataloaders["query"].dataset.imgs
 
-# gallery_cam, gallery_label = get_id(gallery_path)
-# query_cam, query_label = get_id(query_path)
+gallery_cam, gallery_label = get_id(gallery_path)
+query_cam, query_label = get_id(query_path)
 
 
 ######################################################################
@@ -425,10 +424,11 @@ print(model)
 # Extract feature
 since = time.time()
 with torch.no_grad():
-    gallery_feature, gallery_label, gallery_cam = extract_feature(
-        model, dataloaders["gallery"]
+    gallery_feature, _, _ = extract_feature(
+        model,
+        dataloaders["gallery"],
     )
-    query_feature, query_label, query_cam = extract_feature(model, dataloaders["query"])
+    query_feature, _, _ = extract_feature(model, dataloaders["query"])
 
 time_elapsed = time.time() - since
 logging.info(f"Training complete in {time_elapsed // 60:.0f}m {time_elapsed % 60:.2f}s")
@@ -438,11 +438,11 @@ print("Gallery label:", gallery_label)
 # Save to Matlab for check
 result = {
     "gallery_f": gallery_feature.numpy(),
-    "gallery_label": gallery_label.tolist(),
-    "gallery_cam": gallery_cam.tolist(),
+    "gallery_label": gallery_label,
+    "gallery_cam": gallery_cam,
     "query_f": query_feature.numpy(),
-    "query_label": query_label.tolist(),
-    "query_cam": query_cam.tolist(),
+    "query_label": query_label,
+    "query_cam": query_cam,
 }
 scipy.io.savemat("pytorch_result.mat", result)
 
