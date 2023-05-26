@@ -1,9 +1,9 @@
 import torch
 import torch.nn as nn
 from torch.nn import init
+from torch.autograd import Variable
 from torchvision import models
 from torchvision.models.resnet import ResNet50_Weights
-from torch.autograd import Variable
 import pretrainedmodels
 import timm
 from utils import load_state_dict_mute

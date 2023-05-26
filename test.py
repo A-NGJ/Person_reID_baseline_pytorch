@@ -7,7 +7,6 @@ import json
 import logging
 import math
 import os
-import re
 import shutil
 import time
 from PIL import Image
@@ -179,30 +178,8 @@ if opt.PCB:
 
 debug_dir = f"{opt.test_dir}/debug"
 
-# if opt.multi:
-#     image_datasets = {
-#         x: datasets.ImageFolder(os.path.join(opt.test_dir, x), data_transforms)
-#         for x in ["gallery", "query", "multi-query"]
-#     }
-#     dataloaders = {
-#         x: torch.utils.data.DataLoader(
-#             image_datasets[x], batch_size=opt.batchsize, shuffle=False, num_workers=16
-#         )
-#         for x in ["gallery", "query", "multi-query"]
-#     }
-# else:
-#     image_datasets = {
-#         x: datasets.ImageFolder(os.path.join(opt.test_dir, x), data_transforms)
-#         for x in ["gallery", "query"]
-#     }
-# dataloaders = {
-#     x: torch.utils.data.DataLoader(
-#         image_datasets[x], batch_size=opt.batchsize, shuffle=True, num_workers=16
-#     )
-#     for x in ["gallery", "query"]
-# }
 dataloaders = {
-    x: DataLoaderFactory(WIDTH, HEIGHT).get(
+    x: DataLoaderFactory(HEIGHT, WIDTH).get(
         "reid",
         os.path.join(opt.test_dir, x),
         "test",
@@ -272,11 +249,12 @@ def extract_feature(model, dataloaders):
         else:
             opt.linear_num = 2048
 
-    for iter, (img, label, camera, timestamp) in tqdm(
+    for iter, data in tqdm(
         enumerate(dataloaders),
         total=len(dataloaders),
         desc="Extracting features batch",
     ):
+        img = data["image"]
         batch_size: int = img.size(0)
         count += batch_size
         ff = torch.FloatTensor(batch_size, opt.linear_num).zero_().cuda()
@@ -319,52 +297,10 @@ def extract_feature(model, dataloaders):
         start = iter * opt.batchsize
         end = min((iter + 1) * opt.batchsize, len(dataloaders.dataset))
         features[start:end, :] = ff
-        labels[start:end] = label
-        cameras[start:end] = camera
+        labels[start:end] = data["label"]
+        cameras[start:end] = data["camera"]
 
     return features, labels, cameras
-
-
-def get_id(img_path):
-    camera_id = []
-    labels = []
-    for path, v in img_path:
-        filename = os.path.basename(path)
-        dirname = os.path.basename(os.path.dirname(path))
-        label = filename.split("_")[0]
-        # extract camera ID
-        camera = re.search(r"c(\d+)", filename)
-        if camera is None:
-            raise ValueError(f"Camera ID is not found in the filename: {filename}")
-        camera = camera.group(1).lstrip("0")
-        if camera == "":
-            camera = 0
-
-        # remove zero padding from label
-        if dirname == "noise":  # TODO: use constant instead of string
-            labels.append(-1)
-        else:
-            try:
-                label = label.lstrip("0")
-                if label == "":
-                    label = 0
-                else:
-                    label = int(label)
-            except ValueError:
-                logging.warning(
-                    f"Label is not an integer: {label} (filename: {filename})"
-                )
-            label = labels.append(label)
-
-        camera_id.append(int(camera))
-    return camera_id, labels
-
-
-gallery_path = dataloaders["gallery"].dataset.imgs
-query_path = dataloaders["query"].dataset.imgs
-
-gallery_cam, gallery_label = get_id(gallery_path)
-query_cam, query_label = get_id(query_path)
 
 
 ######################################################################
@@ -424,25 +360,26 @@ print(model)
 # Extract feature
 since = time.time()
 with torch.no_grad():
-    gallery_feature, _, _ = extract_feature(
+    gallery_feature, gallery_label, gallery_cam = extract_feature(
         model,
         dataloaders["gallery"],
     )
-    query_feature, _, _ = extract_feature(model, dataloaders["query"])
+    query_feature, query_label, query_cam = extract_feature(
+        model,
+        dataloaders["query"],
+    )
 
 time_elapsed = time.time() - since
 logging.info(f"Training complete in {time_elapsed // 60:.0f}m {time_elapsed % 60:.2f}s")
 
-print("Query label:", query_label)
-print("Gallery label:", gallery_label)
 # Save to Matlab for check
 result = {
     "gallery_f": gallery_feature.numpy(),
-    "gallery_label": gallery_label,
-    "gallery_cam": gallery_cam,
+    "gallery_label": gallery_label.tolist(),
+    "gallery_cam": gallery_cam.tolist(),
     "query_f": query_feature.numpy(),
-    "query_label": query_label,
-    "query_cam": query_cam,
+    "query_label": query_label.tolist(),
+    "query_cam": query_cam.tolist(),
 }
 scipy.io.savemat("pytorch_result.mat", result)
 
@@ -465,11 +402,3 @@ evaluation.plot_curve(
     save_dir=f"./model/{opt.name}/plots",
     markersize=2,
 )
-
-# if opt.multi:
-#     result = {
-#         "mquery_f": mquery_feature.numpy(),
-#         "mquery_label": mquery_label,
-#         "mquery_cam": mquery_cam,
-#     }
-#     scipy.io.savemat("multi_query.mat", result)

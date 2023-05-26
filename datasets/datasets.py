@@ -48,20 +48,22 @@ class ReIDImageDataset(Dataset):
 
         # Extract camera id and sequence id from image path
         file_name = Path(image_path).name
-        label = int(file_name.split("_")[0])
+        try:
+            label = int(file_name.split("_")[0])
+        except ValueError:
+            label = -1
         camera = re.search(r"c(\d+)", file_name)
         if camera is None:
             raise ValueError(f"Could not find camera id in {file_name}")
         camera = int(camera.group(1))
         timestamp = int(file_name.split(".")[0].split("_")[-1])
 
-        return image, label, camera, timestamp
-        # return {
-        #     "image": image,
-        #     "label": label,
-        #     "camera": camera,
-        #     "timestamp": timestamp,
-        # }
+        return {
+            "image": image,
+            "label": label,
+            "camera": camera,
+            "timestamp": timestamp,
+        }
 
 
 class ContextVideoDataset(Dataset):
