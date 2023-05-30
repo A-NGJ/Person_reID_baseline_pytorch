@@ -1,3 +1,5 @@
+from collections import defaultdict
+import itertools
 import json
 import os
 import logging
@@ -5,14 +7,15 @@ from typing import (
     Any,
     Dict,
     List,
+    Sequence,
+    Union,
 )
 import shutil
 import scipy.io
+from scipy.stats import gaussian_kde
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
-
-from datasets.datasets import DataLoaderFactory
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(message)s")
 
@@ -24,7 +27,7 @@ class Result:
         self.dataset_name = dataset_name
 
     def all_queries(self):
-        return self.results[min(self.results.keys())]
+        return self.results # [min(self.results.keys())]
 
     def plot_curve(
         self,
@@ -118,11 +121,98 @@ class Result:
             plt.show()
 
 
+def smoothed_probability(
+    cameras: Sequence, timestamps: Sequence, delta_t: int = 100
+) -> dict:
+    """
+    Probability density function of the time interval between appearance in two cameras.
+    """
+    histograms = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+
+    for i, ci in enumerate(cameras):
+        for j, cj in enumerate(cameras[1:]):
+            if timestamps[j] > timestamps[i]:
+                # Calculate the time interval and the bin it falls into
+                time_interval = timestamps[j] - timestamps[i]
+                hist_bin = int(time_interval // delta_t) + 1
+
+                # Update the histogram for the given cameras and time bin
+                histograms[ci][cj][hist_bin] += 1
+
+    # Calculate probabilities from histograms
+    probabilities = defaultdict(dict)
+    for ci in histograms:
+        for cj in histograms[ci]:
+            # Gaussian Kernel Density Estimation
+            kde = gaussian_kde(list(histograms[ci][cj].values()))
+            probabilities[ci][cj] = kde
+
+    return probabilities
+
+
+def logistic_smoothing(
+    x: Union[np.ndarray, float],
+    lambda_: float,
+    gamma: float,
+) -> Union[np.ndarray, float]:
+    return 1 / (1 + np.exp(-lambda_ * (x - gamma)))
+
+
+def joint_metric(
+    *,
+    query_camera: int,
+    query_timestamp: int,
+    similarity: np.ndarray,
+    probabilities: dict,
+    cameras: Sequence,
+    timestamps: Sequence,
+    lambda_sim: float = 1.0,
+    lambda_prob: float = 2.0,
+    gamma_sim: float = 5.0,
+    gamma_prob: float = 5.0,
+) -> np.ndarray:
+    """
+    Computes the joint metric for a given similarity matrix and probability density function
+    of the time interval between appearance in two cameras.
+    """
+    joint = np.zeros_like(similarity)
+
+    sim_score = logistic_smoothing(similarity, lambda_sim, gamma_sim)
+    sim_score = np.array(sim_score)
+    for cam_idx, cam in enumerate(cameras):
+        if cam == query_camera:
+            continue
+        delta_t = timestamps[cam_idx] - query_timestamp
+        prob_score = logistic_smoothing(
+            probabilities[query_camera][cam](delta_t), lambda_prob, gamma_prob
+        )
+
+        joint[cam_idx] += sim_score[cam_idx] * prob_score
+
+    return joint
+
+
+def plot_probabilites(
+    probabilities: dict, from_camera: int, to_camera: int, ax: plt.Axes
+):
+    x_smooth = np.linspace(0, 3000, 200)
+
+    if from_camera in probabilities and to_camera in probabilities[from_camera]:
+        ax.plot(
+            x_smooth,
+            probabilities[from_camera][to_camera](x_smooth),
+            label=f"{from_camera}->{to_camera}",
+        )
+    else:
+        logging.warning(f"Missing probabilities for {from_camera}->{to_camera}")
+
+
 def evaluate(
     results: dict,
     query_id: int,
     filenames: Dict[str, List[Dict[str, Any]]],
     debug_dir: str = "",
+    st_reid: bool = False,
 ):
     """
     Computes average precision and CMC for a given query and gallery.
@@ -135,6 +225,10 @@ def evaluate(
         The id of the query.
     filenames : Dict[str, str]
         The filenames of the gallery images.
+    debug_dir : str
+        The directory to save debug images.
+    st_reid : bool
+        Whether to use the ST-ReID method.
 
     Returns
     -------
@@ -150,12 +244,34 @@ def evaluate(
 
     query = results["query_feature"][query_id].view(-1, 1)
 
+    pdf_dict = smoothed_probability(
+        results["gallery_cam"],
+        results["gallery_timestamp"],
+    )
+
+    # fig, ax = plt.subplots()
+    # for camera in set(results["gallery_cam"]) - {results["query_cam"][query_id]}:
+    #     plot_probabilites(probabilites, results["query_cam"][query_id], camera, ax)
+    # ax.legend()
+    # plt.show()
+    # raise Exception
+
     # Perform matrix multiplication
     score = torch.mm(results["gallery_feature"], query)
     # Normalize
     score = score.squeeze(1).cpu()
     # Convert to numpy array
     score = score.numpy()
+
+    if st_reid:
+        score = joint_metric(
+            query_camera=results["query_cam"][query_id],
+            query_timestamp=results["query_timestamp"][query_id],
+            similarity=score,
+            probabilities=pdf_dict,
+            cameras=results["gallery_cam"],
+            timestamps=results["gallery_timestamp"],
+        )
     # predict index
     index = np.argsort(score)
     # from small to large
@@ -224,31 +340,25 @@ def load_results(results_file: str = "pytorch_result.mat") -> Dict[str, Any]:
     query_feature = torch.FloatTensor(result["query_f"]).cuda()
     query_cam = result["query_cam"][0]
     query_label = result["query_label"][0]
+    query_timestamp = result["query_timestamp"][0]
     gallery_feature = torch.FloatTensor(result["gallery_f"]).cuda()
     gallery_cam = result["gallery_cam"][0]
     gallery_label = result["gallery_label"][0]
+    gallery_timestamp = result["gallery_timestamp"][0]
 
     return {
         "query_feature": query_feature,
         "query_cam": query_cam,
         "query_label": query_label,
+        "query_timestamp": query_timestamp,
         "gallery_feature": gallery_feature,
         "gallery_cam": gallery_cam,
         "gallery_label": gallery_label,
+        "gallery_timestamp": gallery_timestamp,
     }
 
 
-# multi = os.path.isfile("multi_query.mat")
-
-# if multi:
-#     m_result = scipy.io.loadmat("multi_query.mat")
-#     mquery_feature = torch.FloatTensor(m_result["mquery_f"])
-#     mquery_cam = m_result["mquery_cam"][0]
-#     mquery_label = m_result["mquery_label"][0]
-#     mquery_feature = mquery_feature.cuda()
-
-
-def run(results_file: str = "pytorch_result.mat", debug_dir: str = ""):
+def run(results_file: str = "pytorch_result.mat", debug_dir: str = "", st_reid: bool = False):
     results = load_results(results_file)
 
     filenames = {}  # list of gallery frames and their resolutions
@@ -258,44 +368,44 @@ def run(results_file: str = "pytorch_result.mat", debug_dir: str = ""):
 
     logging.info(f"Query feature shape: {results['query_feature'].shape}")
     # get sorted resolution list in ascending order
-    resolution_list = sorted(
-        list(set(filename["resolution"] for filename in filenames["query"]))
-    )
+    # resolution_list = sorted(
+    #     list(set(filename["resolution"] for filename in filenames["query"]))
+    # )
     evaluation_results = {}
-    for resolution_threshold in np.linspace(
-        resolution_list[0], resolution_list[-1], num=100, dtype=int
-    ):
+    # for resolution_threshold in np.linspace(
+    #     resolution_list[0], resolution_list[-1], num=100, dtype=int
+    # ):
         # filter out query labels with resolution less than threshold
-        query_index = np.argwhere(
-            np.array([file_["resolution"] for file_ in filenames["query"]])
-            >= resolution_threshold
-        ).flatten()
-        query_labels = results["query_label"][query_index]
-        if len(query_labels) == 1:
-            print()
+        # query_index = np.argwhere(
+        #     np.array([file_["resolution"] for file_ in filenames["query"]])
+        #     >= resolution_threshold
+        # ).flatten()
+    query_labels = results["query_label"]#[query_index]
+    if len(query_labels) == 1:
+        print()
 
-        cmc = torch.IntTensor(len(results["gallery_label"])).zero_()
-        avg_precision = 0.0
-        for i, _ in enumerate(query_labels):
-            ap_tmp, cmc_tmp = evaluate(results, i, filenames, debug_dir)
-            if cmc_tmp[0] == -1:
-                continue
-            cmc += cmc_tmp
-            avg_precision += ap_tmp
+    cmc = torch.IntTensor(len(results["gallery_label"])).zero_()
+    avg_precision = 0.0
+    for i, _ in enumerate(query_labels):
+        ap_tmp, cmc_tmp = evaluate(results, i, filenames, debug_dir, st_reid=st_reid)
+        if cmc_tmp[0] == -1:
+            continue
+        cmc += cmc_tmp
+        avg_precision += ap_tmp
 
-        cmc = cmc.float()
-        cmc /= len(query_labels)  # average CMC
-        logging.info(
-            f"Rank@1:{cmc[0]} Rank@5:{cmc[4]} Rank@10:{cmc[9]} "
-            f"mAP:{avg_precision / len(query_labels)}"
-        )
-        evaluation_results[resolution_threshold] = {
-            "rank1": float(cmc[0]),
-            "rank5": float(cmc[4]),
-            "rank10": float(cmc[9]),
-            "mAP": avg_precision / len(query_labels),
-            "count": len(query_labels),
-        }
+    cmc = cmc.float()
+    cmc /= len(query_labels)  # average CMC
+    logging.info(
+        f"Rank@1:{cmc[0]} Rank@5:{cmc[4]} Rank@10:{cmc[9]} "
+        f"mAP:{avg_precision / len(query_labels)}"
+    )
+    evaluation_results = {
+        "rank1": float(cmc[0]),
+        "rank5": float(cmc[4]),
+        "rank10": float(cmc[9]),
+        "mAP": avg_precision / len(query_labels),
+        "count": len(query_labels),
+    }
     return Result(evaluation_results)
 
 

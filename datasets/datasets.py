@@ -24,20 +24,20 @@ class ReIDImageDataset(Dataset):
     |   ...
     """
 
-    def __init__(self, root_dir: str, transform=None):
+    def __init__(self, root_dir: str, transform=None, step: int = 1):
         if not Path(root_dir).exists():
             raise FileNotFoundError(f"Directory {root_dir} does not exist")
         self.root_dir = root_dir
         self.transform = transform
         self.dataset = ImageFolder(root_dir)
-        self.imgs = self.dataset.imgs
-        self.classes = self.dataset.classes
+        self.imgs = self.dataset.imgs[::step]
+        self.classes = self.dataset.classes[::step]
 
     def __len__(self):
-        return len(self.dataset)
+        return len(self.imgs)
 
     def __getitem__(self, idx: int):
-        image_path, _ = self.dataset.samples[idx]
+        image_path, _ = self.imgs[idx]
         try:
             image = Image.open(image_path).convert("RGB")
         except OSError:
@@ -62,7 +62,7 @@ class ReIDImageDataset(Dataset):
             "image": image,
             "label": label,
             "camera": camera,
-            "timestamp": (timestamp,),
+            "timestamp": timestamp,
         }
 
 
@@ -71,13 +71,13 @@ class ContextVideoDataset(Dataset):
     Dataset for Context Video images.
     """
 
-    def __init__(self, root_dir: str, transform=None):
+    def __init__(self, root_dir: str, transform=None, step: int = 1):
         if not Path(root_dir).exists():
             raise FileNotFoundError(f"Directory {root_dir} does not exist")
         self.root_dir = root_dir
         self.transform = transform
         self.dataset = ImageFolder(root_dir)
-        self.imgs = self.dataset.imgs
+        self.imgs = self.dataset.imgs[::step]
         self.classes = self.dataset.classes
         self.img_by_label = defaultdict(lambda: defaultdict(list))
         self.timestamp_by_label = defaultdict(lambda: defaultdict(list))
@@ -95,10 +95,10 @@ class ContextVideoDataset(Dataset):
             self.frames_by_label[label][camera_id].append(image)
 
     def __len__(self):
-        return len(self.dataset)
+        return len(self.imgs)
 
     def __getitem__(self, idx: int):
-        image_path, _ = self.dataset.samples[idx]
+        image_path, _ = self.dataset.imgs[idx]
         try:
             image = Image.open(image_path).convert("RGB")
         except OSError:
@@ -139,11 +139,12 @@ class DatasetFactory:
         dataset_name,
         data_path: str,
         transforms: transforms.Compose,
+        step: int = 1,
     ) -> torch.utils.data.DataLoader:
         if dataset_name == "reid":
-            return ReIDImageDataset(data_path, transforms)
+            return ReIDImageDataset(data_path, transforms, step=step)
         if dataset_name == "context_video":
-            return ContextVideoDataset(data_path, transforms)
+            return ContextVideoDataset(data_path, transforms, step=step)
         raise ValueError(f"Dataset {dataset_name} not supported")
 
 
@@ -152,7 +153,12 @@ factory = DatasetFactory()
 
 class DataLoaderFactory:
     def __init__(
-        self, heigth: int, width: int, batch_size: int = 32, num_workers: int = 16
+        self,
+        heigth: int,
+        width: int,
+        batch_size: int = 32,
+        num_workers: int = 16,
+        step: int = 1,
     ):
         self.test_transforms = transforms.Compose(
             [
@@ -167,9 +173,13 @@ class DataLoaderFactory:
 
         self.batch_size = batch_size
         self.num_workers = num_workers
+        self.step: int = step
 
     def get(
-        self, dataset_name: str, data_path: str, mode: str
+        self,
+        dataset_name: str,
+        data_path: str,
+        mode: str,
     ) -> torch.utils.data.DataLoader:
         if mode == "train":
             raise NotImplementedError("Train mode not implemented")
@@ -183,7 +193,12 @@ class DataLoaderFactory:
             #     num_workers=self.num_workers,
             # )
         if mode == "test":
-            dataset = factory.get_dataset(dataset_name, data_path, self.test_transforms)
+            dataset = factory.get_dataset(
+                dataset_name,
+                data_path,
+                self.test_transforms,
+                self.step,
+            )
             return torch.utils.data.DataLoader(
                 dataset,
                 batch_size=self.batch_size,

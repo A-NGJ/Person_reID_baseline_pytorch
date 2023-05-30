@@ -11,6 +11,7 @@ import shutil
 import time
 from PIL import Image
 from tqdm import tqdm
+from typing import Iterable
 
 import torch
 import torch.utils.data
@@ -82,6 +83,18 @@ parser.add_argument(
     choices=["reid", "context_video"],
     default="reid",
     help="Dataloader name",
+)
+parser.add_argument(
+    "--step",
+    type=int,
+    default=1,
+    help="Step between loaded frames.",
+)
+parser.add_argument(
+    "--st-reid",
+    type=bool,
+    default=False,
+    help="Use ST-ReID method",
 )
 
 opt = parser.parse_args()
@@ -177,7 +190,7 @@ debug_dir = f"{opt.test_dir}/debug"
 
 # Initialize data loaders
 dataloaders = {
-    x: DataLoaderFactory(HEIGHT, WIDTH).get(
+    x: DataLoaderFactory(HEIGHT, WIDTH, step=opt.step).get(
         opt.dataloader,
         os.path.join(opt.test_dir, x),
         "test",
@@ -236,6 +249,8 @@ def extract_feature(model, dataloaders):
     features = torch.FloatTensor(data_len, opt.linear_num)
     labels = torch.IntTensor(data_len)
     cameras = torch.IntTensor(data_len)
+    timestamps = torch.IntTensor(data_len)
+
     count = 0
     if opt.linear_num <= 0:
         if opt.use_swin or opt.use_swinv2 or opt.use_dense or opt.use_convnext:
@@ -297,11 +312,13 @@ def extract_feature(model, dataloaders):
         features[start:end, :] = ff
         labels[start:end] = data["label"]
         cameras[start:end] = data["camera"]
+        timestamps[start:end] = data["timestamp"]
 
     return {
         "features": features,
         "labels": labels,
         "cameras": cameras,
+        "timestamps": timestamps,
     }
 
 
@@ -344,11 +361,6 @@ if use_gpu:
     model = model.cuda()
 
 
-# logging.warning(
-#     "Here I fuse conv and bn for faster inference, "
-#     "and it does not work for transformers. Comment "
-#     "out this following line if you do not want to fuse conv&bn."
-# )
 model = fuse_all_conv_bn(model)
 
 # We can optionally trace the forward method with PyTorch JIT so it runs faster.
@@ -378,9 +390,11 @@ result = {
     "gallery_f": gallery_data["features"].numpy(),
     "gallery_label": gallery_data["labels"].tolist(),
     "gallery_cam": gallery_data["cameras"].tolist(),
+    "gallery_timestamp": gallery_data["timestamps"].tolist(),
     "query_f": query_data["features"].numpy(),
     "query_label": query_data["labels"].tolist(),
     "query_cam": query_data["cameras"].tolist(),
+    "query_timestamp": query_data["timestamps"].tolist(),
 }
 scipy.io.savemat("pytorch_result.mat", result)
 
@@ -391,7 +405,7 @@ result = f"./model/{opt.name}/result.txt"
 with open(result, "a", encoding="utf-8") as f:
     f.write(str(opt) + "\n")
 
-evaluation = evaluate_gpu.run(debug_dir=debug_dir)
+evaluation = evaluate_gpu.run(debug_dir=debug_dir, st_reid=opt.st_reid)
 evaluation.model_name = opt.name
 evaluation.dataset_name = opt.dataset_name
 
@@ -399,7 +413,7 @@ logging.info("Saving result to %s", result)
 with open(result, "a", encoding="utf-8") as f:
     f.write(str(evaluation.all_queries()) + "\n")
 
-evaluation.plot_curve(
-    save_dir=f"./model/{opt.name}/plots",
-    markersize=2,
-)
+# evaluation.plot_curve(
+#     save_dir=f"./model/{opt.name}/plots",
+#     markersize=2,
+# )
