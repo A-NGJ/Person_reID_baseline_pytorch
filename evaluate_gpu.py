@@ -1,5 +1,4 @@
 from collections import defaultdict
-import itertools
 import json
 import os
 import logging
@@ -16,6 +15,7 @@ from scipy.stats import gaussian_kde
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
+from tqdm import tqdm
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(message)s")
 
@@ -27,7 +27,7 @@ class Result:
         self.dataset_name = dataset_name
 
     def all_queries(self):
-        return self.results # [min(self.results.keys())]
+        return self.results  # [min(self.results.keys())]
 
     def plot_curve(
         self,
@@ -121,33 +121,95 @@ class Result:
             plt.show()
 
 
+def gaussian_kernel(x: float, sigma: float) -> float:
+    return np.exp(-np.power(x / sigma, 2.0) / (2 * sigma)) / (
+        sigma * np.sqrt(2.0 * np.pi)
+    )
+
+
+def parzen_window_estimation(
+    x: float, data: np.ndarray, width: float, sigma=50
+) -> float:
+    """
+    Estimates the probability density function at a given point using Parzen window method.
+
+    Parameters
+    ----------
+    x : float
+        The point at which to estimate the probability density function.
+    data : ndarray
+        The data points as a one-dimensional numpy array.
+    width : float
+        The bandwidth of the Parzen window, controlling the width of the kernel function.
+    sigma : float, optional
+        The standard deviation of the Gaussian kernel, by default 50.
+
+    Returns
+    -------
+    float
+        The estimated density at point `x`.
+    """
+
+    data_len = len(data)
+    weights = np.empty(data_len)
+
+    for i in range(data_len):
+        weights[i] = gaussian_kernel((x - data[i]) / width, sigma)
+
+    return weights.sum() / data_len / width
+
+
 def smoothed_probability(
     cameras: Sequence, timestamps: Sequence, delta_t: int = 100
 ) -> dict:
     """
     Probability density function of the time interval between appearance in two cameras.
     """
-    histograms = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+    histograms = defaultdict(lambda: defaultdict(list))
 
     for i, ci in enumerate(cameras):
         for j, cj in enumerate(cameras[1:]):
-            if timestamps[j] > timestamps[i]:
+            if timestamps[j] > timestamps[i] and ci != cj:
                 # Calculate the time interval and the bin it falls into
                 time_interval = timestamps[j] - timestamps[i]
-                hist_bin = int(time_interval // delta_t) + 1
+                histograms[ci][cj].append(time_interval)
+                # hist_bin = int(time_interval // delta_t) + 1
 
-                # Update the histogram for the given cameras and time bin
-                histograms[ci][cj][hist_bin] += 1
+                # # Update the histogram for the given cameras and time bin
+                # histograms[ci][cj][hist_bin] += 1
+                # histograms[ci][cj]["sum"] += 1
 
-    # Calculate probabilities from histograms
-    probabilities = defaultdict(dict)
+    smoothed_densities = defaultdict(dict)
     for ci in histograms:
         for cj in histograms[ci]:
-            # Gaussian Kernel Density Estimation
-            kde = gaussian_kde(list(histograms[ci][cj].values()))
-            probabilities[ci][cj] = kde
+            kde_model = gaussian_kde(histograms[ci][cj])
+            x_values = np.linspace(0, max(histograms[ci][cj]), max(histograms[ci][cj]))
+            smoothed_densities[ci][cj] = kde_model.evaluate(x_values)
 
-    return probabilities
+    return smoothed_densities
+
+    # # Normalize histograms
+    # for ci in histograms:
+    #     for cj in histograms[ci]:
+    #         for bin in histograms[ci][cj]:
+    #             if bin != "sum":
+    #                 histograms[ci][cj][bin] /= histograms[ci][cj]["sum"]
+
+    # # Calculate probabilities from histograms
+    # smoothed_histograms = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+    # for ci in histograms:
+    #     for cj in histograms[ci]:
+    #         bins = np.array(list(histograms[ci][cj].keys()))
+    #         densities = np.array(list(histograms[ci][cj].values()))
+
+    #         for i, density in enumerate(densities):
+    #             smoothed_density = parzen_window_estimation(
+    #                 density, densities, width=1, sigma=50
+    #             )
+
+    #             smoothed_histograms[ci][cj][bins[i]] = smoothed_density
+
+    return smoothed_histograms
 
 
 def logistic_smoothing(
@@ -176,15 +238,18 @@ def joint_metric(
     of the time interval between appearance in two cameras.
     """
     joint = np.zeros_like(similarity)
+    norm_timestamps = np.array(timestamps) / max(timestamps)
 
     sim_score = logistic_smoothing(similarity, lambda_sim, gamma_sim)
     sim_score = np.array(sim_score)
     for cam_idx, cam in enumerate(cameras):
         if cam == query_camera:
             continue
-        delta_t = timestamps[cam_idx] - query_timestamp
+        delta_t = int(
+            abs(norm_timestamps[cam_idx] - query_timestamp / max(timestamps)) * 1000
+        )
         prob_score = logistic_smoothing(
-            probabilities[query_camera][cam](delta_t), lambda_prob, gamma_prob
+            probabilities[query_camera - 1, cam - 1, delta_t], lambda_prob, gamma_prob
         )
 
         joint[cam_idx] += sim_score[cam_idx] * prob_score
@@ -195,12 +260,10 @@ def joint_metric(
 def plot_probabilites(
     probabilities: dict, from_camera: int, to_camera: int, ax: plt.Axes
 ):
-    x_smooth = np.linspace(0, 3000, 200)
-
     if from_camera in probabilities and to_camera in probabilities[from_camera]:
+        smoothed_densities = probabilities[from_camera][to_camera]
         ax.plot(
-            x_smooth,
-            probabilities[from_camera][to_camera](x_smooth),
+            smoothed_densities,
             label=f"{from_camera}->{to_camera}",
         )
     else:
@@ -244,14 +307,9 @@ def evaluate(
 
     query = results["query_feature"][query_id].view(-1, 1)
 
-    pdf_dict = smoothed_probability(
-        results["gallery_cam"],
-        results["gallery_timestamp"],
-    )
-
     # fig, ax = plt.subplots()
     # for camera in set(results["gallery_cam"]) - {results["query_cam"][query_id]}:
-    #     plot_probabilites(probabilites, results["query_cam"][query_id], camera, ax)
+    #     plot_probabilites(pdf_dict, results["query_cam"][query_id], camera, ax)
     # ax.legend()
     # plt.show()
     # raise Exception
@@ -268,7 +326,7 @@ def evaluate(
             query_camera=results["query_cam"][query_id],
             query_timestamp=results["query_timestamp"][query_id],
             similarity=score,
-            probabilities=pdf_dict,
+            probabilities=results["context_distribution"],
             cameras=results["gallery_cam"],
             timestamps=results["gallery_timestamp"],
         )
@@ -345,6 +403,7 @@ def load_results(results_file: str = "pytorch_result.mat") -> Dict[str, Any]:
     gallery_cam = result["gallery_cam"][0]
     gallery_label = result["gallery_label"][0]
     gallery_timestamp = result["gallery_timestamp"][0]
+    context_distribution = result["context_distribution"]
 
     return {
         "query_feature": query_feature,
@@ -355,10 +414,13 @@ def load_results(results_file: str = "pytorch_result.mat") -> Dict[str, Any]:
         "gallery_cam": gallery_cam,
         "gallery_label": gallery_label,
         "gallery_timestamp": gallery_timestamp,
+        "context_distribution": context_distribution,
     }
 
 
-def run(results_file: str = "pytorch_result.mat", debug_dir: str = "", st_reid: bool = False):
+def run(
+    results_file: str = "pytorch_result.mat", debug_dir: str = "", st_reid: bool = False
+):
     results = load_results(results_file)
 
     filenames = {}  # list of gallery frames and their resolutions
@@ -375,18 +437,20 @@ def run(results_file: str = "pytorch_result.mat", debug_dir: str = "", st_reid: 
     # for resolution_threshold in np.linspace(
     #     resolution_list[0], resolution_list[-1], num=100, dtype=int
     # ):
-        # filter out query labels with resolution less than threshold
-        # query_index = np.argwhere(
-        #     np.array([file_["resolution"] for file_ in filenames["query"]])
-        #     >= resolution_threshold
-        # ).flatten()
-    query_labels = results["query_label"]#[query_index]
+    # filter out query labels with resolution less than threshold
+    # query_index = np.argwhere(
+    #     np.array([file_["resolution"] for file_ in filenames["query"]])
+    #     >= resolution_threshold
+    # ).flatten()
+    query_labels = results["query_label"]  # [query_index]
     if len(query_labels) == 1:
         print()
 
     cmc = torch.IntTensor(len(results["gallery_label"])).zero_()
     avg_precision = 0.0
-    for i, _ in enumerate(query_labels):
+    for i, _ in tqdm(
+        enumerate(query_labels), total=len(query_labels), desc="Evaluating"
+    ):
         ap_tmp, cmc_tmp = evaluate(results, i, filenames, debug_dir, st_reid=st_reid)
         if cmc_tmp[0] == -1:
             continue
@@ -408,34 +472,6 @@ def run(results_file: str = "pytorch_result.mat", debug_dir: str = "", st_reid: 
     }
     return Result(evaluation_results)
 
-
-# multiple-query
-# CMC = torch.IntTensor(len(gallery_label)).zero_()
-# avg_precision = 0.0
-# if multi:
-#     for i, _ in enumerate(query_label):
-#         mquery_index1 = np.argwhere(mquery_label == query_label[i])
-#         mquery_index2 = np.argwhere(mquery_cam == query_cam[i])
-#         mquery_index = np.intersect1d(mquery_index1, mquery_index2)
-#         mq = torch.mean(mquery_feature[mquery_index, :], dim=0)
-#         ap_tmp, CMC_tmp = evaluate(
-#             mq,
-#             query_label[i],
-#             query_cam[i],
-#             gallery_feature,
-#             gallery_label,
-#             gallery_cam,
-#             filenames,
-#         )
-#         if CMC_tmp[0] == -1:
-#             continue
-#         CMC = CMC + CMC_tmp
-#         avg_precision += ap_tmp
-#     CMC = CMC.float()
-#     CMC = CMC / len(query_label)  # average CMC
-#     print(
-#         f"Rank@1:{CMC[0]} Rank@5:{CMC[4]} Rank@10:{CMC[9]} mAP:{avg_precision / len(query_label)}"
-#     )
 
 if __name__ == "__main__":
     run(debug_dir="/home/aleksandernagaj/Milestone/data/Milestone/pytorch/debug")

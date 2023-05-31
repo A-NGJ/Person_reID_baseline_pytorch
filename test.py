@@ -21,6 +21,7 @@ from torch import nn
 # from torch.optim import lr_scheduler
 from torch.autograd import Variable
 from torch.backends import cudnn
+from matplotlib import pyplot as plt
 import numpy as np
 
 # import torchvision
@@ -43,10 +44,12 @@ from utils import fuse_all_conv_bn
 import evaluate_gpu
 
 from datasets.datasets import DataLoaderFactory
+import train_context
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(message)s")
 WIDTH: int = 128
 HEIGHT: int = 256
+CONTEXT_DISTRIBUTION_PATH = "context_distribution.npy"
 
 ######################################################################
 parser = argparse.ArgumentParser(description="Test")
@@ -92,8 +95,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--st-reid",
-    type=bool,
-    default=False,
+    action="store_true",
     help="Use ST-ReID method",
 )
 
@@ -195,7 +197,7 @@ dataloaders = {
         os.path.join(opt.test_dir, x),
         "test",
     )
-    for x in ["gallery", "query"]
+    for x in ["gallery", "query", "train"]
 }
 
 # ==== DEBUG ====
@@ -244,7 +246,7 @@ def fliplr(img):
     return img_flip
 
 
-def extract_feature(model, dataloaders):
+def extract_feature(model, dataloaders, name: str):
     data_len = len(dataloaders.dataset)
     features = torch.FloatTensor(data_len, opt.linear_num)
     labels = torch.IntTensor(data_len)
@@ -265,7 +267,7 @@ def extract_feature(model, dataloaders):
     for iter, data in tqdm(
         enumerate(dataloaders),
         total=len(dataloaders),
-        desc="Extracting features batch",
+        desc=f"Extracting {name} features batch",
     ):
         img = data["image"]
         batch_size: int = img.size(0)
@@ -376,25 +378,52 @@ with torch.no_grad():
     gallery_data = extract_feature(
         model,
         dataloaders["gallery"],
+        "gallery",
     )
     query_data = extract_feature(
         model,
         dataloaders["query"],
+        "query",
+    )
+    train_data = extract_feature(
+        model,
+        dataloaders["train"],
+        "train",
     )
 
 time_elapsed = time.time() - since
 logging.info(f"Training complete in {time_elapsed // 60:.0f}m {time_elapsed % 60:.2f}s")
 
+if not os.path.exists(CONTEXT_DISTRIBUTION_PATH):
+    smoothed_distribution = train_context.run(
+        cameras=train_data["cameras"].numpy(),
+        timestamps=train_data["timestamps"].numpy(),
+    )
+else:
+    smoothed_distribution = np.load(CONTEXT_DISTRIBUTION_PATH, allow_pickle=True)
+
+print(smoothed_distribution[0, 1])
+x_values = np.linspace(0, 1000, 1000)
+fig, ax = plt.subplots()
+ax.plot(x_values, smoothed_distribution[0, 1](x_values))
+ax.set_title("Smoothed distribution")
+ax.set_xlabel("Time interval")
+ax.set_ylabel("Probability density")
+plt.show()
+raise Exception
+
+
 # Save to Matlab for check
 result = {
     "gallery_f": gallery_data["features"].numpy(),
-    "gallery_label": gallery_data["labels"].tolist(),
-    "gallery_cam": gallery_data["cameras"].tolist(),
-    "gallery_timestamp": gallery_data["timestamps"].tolist(),
+    "gallery_label": gallery_data["labels"].numpy(),
+    "gallery_cam": gallery_data["cameras"].numpy(),
+    "gallery_timestamp": gallery_data["timestamps"].numpy(),
     "query_f": query_data["features"].numpy(),
-    "query_label": query_data["labels"].tolist(),
-    "query_cam": query_data["cameras"].tolist(),
-    "query_timestamp": query_data["timestamps"].tolist(),
+    "query_label": query_data["labels"].numpy(),
+    "query_cam": query_data["cameras"].numpy(),
+    "query_timestamp": query_data["timestamps"].numpy(),
+    "context_distribution": smoothed_distribution,
 }
 scipy.io.savemat("pytorch_result.mat", result)
 
