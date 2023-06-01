@@ -1,15 +1,13 @@
 from collections import defaultdict
-from typing import Sequence
+from typing import Sequence, Tuple
 
 import numpy as np
 from scipy.stats import gaussian_kde, zscore
 
-import matplotlib.pyplot as plt
-
 
 def smoothed_probability(
     cameras: Sequence, timestamps: Sequence, delta_t: int = 100
-) -> np.ndarray:
+) -> Tuple[np.ndarray, dict]:
     """
     Probability density function of the time interval between appearance in two cameras.
     """
@@ -32,13 +30,4 @@ def smoothed_probability(
             kde_model = gaussian_kde(normalized_data)
             smoothed_densities[ci - 1, cj - 1] = kde_model
 
-    return smoothed_densities
-
-
-def run(
-    cameras: Sequence, timestamps: Sequence, save_file: str = "context_distribution.npy"
-) -> np.ndarray:
-    distribution = smoothed_probability(cameras, timestamps)
-    if save_file:
-        np.save(save_file, distribution)
-    return distribution
+    return smoothed_densities, histograms

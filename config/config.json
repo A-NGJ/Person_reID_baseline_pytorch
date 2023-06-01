@@ -1,0 +1,6 @@
+{
+  "context_distribution_path": "cache/context_distribution.pickle",
+  "results_path": "cache/results.mat",
+  "width": 128,
+  "height": 256
+}

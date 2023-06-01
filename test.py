@@ -7,21 +7,19 @@ import json
 import logging
 import math
 import os
+import pickle
 import shutil
 import time
 from PIL import Image
 from tqdm import tqdm
-from typing import Iterable
 
 import torch
 import torch.utils.data
 from torch import nn
 
 # import torch.optim as optim
-# from torch.optim import lr_scheduler
 from torch.autograd import Variable
 from torch.backends import cudnn
-from matplotlib import pyplot as plt
 import numpy as np
 
 # import torchvision
@@ -45,11 +43,10 @@ import evaluate_gpu
 
 from datasets.datasets import DataLoaderFactory
 import train_context
+from config import Config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(message)s")
-WIDTH: int = 128
-HEIGHT: int = 256
-CONTEXT_DISTRIBUTION_PATH = "context_distribution.npy"
+project_config = Config.from_json("config/config.json")
 
 ######################################################################
 parser = argparse.ArgumentParser(description="Test")
@@ -192,13 +189,23 @@ debug_dir = f"{opt.test_dir}/debug"
 
 # Initialize data loaders
 dataloaders = {
-    x: DataLoaderFactory(HEIGHT, WIDTH, step=opt.step).get(
+    x: DataLoaderFactory(
+        project_config.height, project_config.width, step=opt.step
+    ).get(
         opt.dataloader,
         os.path.join(opt.test_dir, x),
         "test",
     )
-    for x in ["gallery", "query", "train"]
+    for x in ["gallery", "train"]
 }
+
+dataloaders["query"] = DataLoaderFactory(
+    project_config.height, project_config.width
+).get(
+    opt.dataloader,
+    os.path.join(opt.test_dir, "query"),
+    "test",
+)
 
 # ==== DEBUG ====
 if os.path.exists(debug_dir):
@@ -248,6 +255,7 @@ def fliplr(img):
 
 def extract_feature(model, dataloaders, name: str):
     data_len = len(dataloaders.dataset)
+    print("data len", data_len)
     features = torch.FloatTensor(data_len, opt.linear_num)
     labels = torch.IntTensor(data_len)
     cameras = torch.IntTensor(data_len)
@@ -324,6 +332,25 @@ def extract_feature(model, dataloaders, name: str):
     }
 
 
+def extract_context_feature(dataloaders, batch_size: int, name: str):
+    data_len = len(dataloaders.dataset)
+    cameras = torch.IntTensor(data_len)
+    timestamps = torch.IntTensor(data_len)
+
+    for iter, data in tqdm(
+        enumerate(dataloaders),
+        total=len(dataloaders),
+        desc=f"Extracting {name} context features batch",
+    ):
+        # batch_size = data["camera"].size(0)
+        start: int = iter * batch_size
+        end = min((iter + 1) * batch_size, len(dataloaders.dataset))
+        cameras[start:end] = data["camera"]
+        timestamps[start:end] = data["timestamp"]
+
+    return {"cameras": cameras, "timestamps": timestamps}
+
+
 ######################################################################
 # Load Collected data Trained model
 print("=" * 20 + "test" + "=" * 20)
@@ -372,60 +399,56 @@ model = fuse_all_conv_bn(model)
 dummy_forward_input = torch.rand(opt.batchsize, 3, h, w).cuda()
 model = torch.jit.trace(model, dummy_forward_input)
 
-# Extract feature
-since = time.time()
-with torch.no_grad():
-    gallery_data = extract_feature(
-        model,
-        dataloaders["gallery"],
-        "gallery",
+if not project_config.results_path.exists():
+    # Extract feature
+    since = time.time()
+    with torch.no_grad():
+        gallery_data = extract_feature(
+            model,
+            dataloaders["gallery"],
+            "gallery",
+        )
+        query_data = extract_feature(
+            model,
+            dataloaders["query"],
+            "query",
+        )
+    if not project_config.context_distribution_path.exists():
+        train_data = extract_context_feature(
+            dataloaders["train"],
+            opt.batchsize,
+            "train",
+        )
+
+        smoothed_distribution, histogram = train_context.smoothed_probability(
+            cameras=train_data["cameras"].numpy(),
+            timestamps=train_data["timestamps"].numpy(),
+        )
+
+        # plt.plot(smoothed_distribution[0, 1](np.linspace(-3, 3, 1000)))
+        # plt.savefig("test.png")
+        # save smoothed distribution
+        with project_config.context_distribution_path.open("wb") as f:
+            pickle.dump(smoothed_distribution, f)
+
+    time_elapsed = time.time() - since
+    logging.info(
+        f"Training complete in {time_elapsed // 60:.0f}m {time_elapsed % 60:.2f}s"
     )
-    query_data = extract_feature(
-        model,
-        dataloaders["query"],
-        "query",
-    )
-    train_data = extract_feature(
-        model,
-        dataloaders["train"],
-        "train",
-    )
 
-time_elapsed = time.time() - since
-logging.info(f"Training complete in {time_elapsed // 60:.0f}m {time_elapsed % 60:.2f}s")
+    # Save to Matlab for check
+    result = {
+        "gallery_f": gallery_data["features"].numpy(),
+        "gallery_label": gallery_data["labels"].numpy(),
+        "gallery_cam": gallery_data["cameras"].numpy(),
+        "gallery_timestamp": gallery_data["timestamps"].numpy(),
+        "query_f": query_data["features"].numpy(),
+        "query_label": query_data["labels"].numpy(),
+        "query_cam": query_data["cameras"].numpy(),
+        "query_timestamp": query_data["timestamps"].numpy(),
+    }
+    scipy.io.savemat(project_config.results_path, result)
 
-if not os.path.exists(CONTEXT_DISTRIBUTION_PATH):
-    smoothed_distribution = train_context.run(
-        cameras=train_data["cameras"].numpy(),
-        timestamps=train_data["timestamps"].numpy(),
-    )
-else:
-    smoothed_distribution = np.load(CONTEXT_DISTRIBUTION_PATH, allow_pickle=True)
-
-print(smoothed_distribution[0, 1])
-x_values = np.linspace(0, 1000, 1000)
-fig, ax = plt.subplots()
-ax.plot(x_values, smoothed_distribution[0, 1](x_values))
-ax.set_title("Smoothed distribution")
-ax.set_xlabel("Time interval")
-ax.set_ylabel("Probability density")
-plt.show()
-raise Exception
-
-
-# Save to Matlab for check
-result = {
-    "gallery_f": gallery_data["features"].numpy(),
-    "gallery_label": gallery_data["labels"].numpy(),
-    "gallery_cam": gallery_data["cameras"].numpy(),
-    "gallery_timestamp": gallery_data["timestamps"].numpy(),
-    "query_f": query_data["features"].numpy(),
-    "query_label": query_data["labels"].numpy(),
-    "query_cam": query_data["cameras"].numpy(),
-    "query_timestamp": query_data["timestamps"].numpy(),
-    "context_distribution": smoothed_distribution,
-}
-scipy.io.savemat("pytorch_result.mat", result)
 
 logging.info("Evaluating %s", opt.name)
 result = f"./model/{opt.name}/result.txt"
