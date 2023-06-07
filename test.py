@@ -7,7 +7,6 @@ import json
 import logging
 import math
 import os
-import pickle
 import shutil
 import time
 from PIL import Image
@@ -94,6 +93,11 @@ parser.add_argument(
     "--st-reid",
     action="store_true",
     help="Use ST-ReID method",
+)
+parser.add_argument(
+    "--no-cache",
+    action="store_true",
+    help="Do not use cached features",
 )
 
 opt = parser.parse_args()
@@ -190,20 +194,23 @@ debug_dir = f"{opt.test_dir}/debug"
 # Initialize data loaders
 dataloaders = {
     x: DataLoaderFactory(
-        project_config.height, project_config.width, step=opt.step
+        project_config.height,
+        project_config.width,
     ).get(
         opt.dataloader,
         os.path.join(opt.test_dir, x),
         "test",
     )
-    for x in ["gallery", "train"]
+    for x in ["query", "train"]
 }
 
-dataloaders["query"] = DataLoaderFactory(
-    project_config.height, project_config.width
+dataloaders["gallery"] = DataLoaderFactory(
+    project_config.height,
+    project_config.width,
+    step=opt.step,
 ).get(
     opt.dataloader,
-    os.path.join(opt.test_dir, "query"),
+    os.path.join(opt.test_dir, "gallery"),
     "test",
 )
 
@@ -322,7 +329,7 @@ def extract_feature(model, dataloaders, name: str):
         features[start:end, :] = ff
         labels[start:end] = data["label"]
         cameras[start:end] = data["camera"]
-        timestamps[start:end] = data["timestamp"]
+        timestamps[start:end] = data["timestamp"][-1]
 
     return {
         "features": features,
@@ -335,7 +342,8 @@ def extract_feature(model, dataloaders, name: str):
 def extract_context_feature(dataloaders, batch_size: int, name: str):
     data_len = len(dataloaders.dataset)
     cameras = torch.IntTensor(data_len)
-    timestamps = torch.IntTensor(data_len)
+    labels = torch.IntTensor(data_len)
+    timestamps_in, timestamps_out = torch.IntTensor(data_len), torch.IntTensor(data_len)
 
     for iter, data in tqdm(
         enumerate(dataloaders),
@@ -346,9 +354,16 @@ def extract_context_feature(dataloaders, batch_size: int, name: str):
         start: int = iter * batch_size
         end = min((iter + 1) * batch_size, len(dataloaders.dataset))
         cameras[start:end] = data["camera"]
-        timestamps[start:end] = data["timestamp"]
+        labels[start:end] = data["label"]
+        timestamps_in[start:end] = data["timestamp"][0]
+        timestamps_out[start:end] = data["timestamp"][-1]
 
-    return {"cameras": cameras, "timestamps": timestamps}
+    return {
+        "labels": labels,
+        "cameras": cameras,
+        "timestamps_in": timestamps_in,
+        "timestamps_out": timestamps_out,
+    }
 
 
 ######################################################################
@@ -399,7 +414,21 @@ model = fuse_all_conv_bn(model)
 dummy_forward_input = torch.rand(opt.batchsize, 3, h, w).cuda()
 model = torch.jit.trace(model, dummy_forward_input)
 
-if not project_config.results_path.exists():
+smoothed_distribution = None
+if opt.st_reid:
+    train_data = extract_context_feature(
+        dataloaders["train"],
+        opt.batchsize,
+        "train",
+    )
+
+    smoothed_distribution, histogram = train_context.smoothed_probability(
+        labels=train_data["labels"].numpy(),
+        cameras=train_data["cameras"].numpy(),
+        timestamps_in=train_data["timestamps_in"].numpy(),
+        timestamps_out=train_data["timestamps_out"].numpy(),
+    )
+if not project_config.results_path.exists() or opt.no_cache:
     # Extract feature
     since = time.time()
     with torch.no_grad():
@@ -413,23 +442,6 @@ if not project_config.results_path.exists():
             dataloaders["query"],
             "query",
         )
-    if not project_config.context_distribution_path.exists():
-        train_data = extract_context_feature(
-            dataloaders["train"],
-            opt.batchsize,
-            "train",
-        )
-
-        smoothed_distribution, histogram = train_context.smoothed_probability(
-            cameras=train_data["cameras"].numpy(),
-            timestamps=train_data["timestamps"].numpy(),
-        )
-
-        # plt.plot(smoothed_distribution[0, 1](np.linspace(-3, 3, 1000)))
-        # plt.savefig("test.png")
-        # save smoothed distribution
-        with project_config.context_distribution_path.open("wb") as f:
-            pickle.dump(smoothed_distribution, f)
 
     time_elapsed = time.time() - since
     logging.info(
@@ -457,15 +469,14 @@ result = f"./model/{opt.name}/result.txt"
 with open(result, "a", encoding="utf-8") as f:
     f.write(str(opt) + "\n")
 
-evaluation = evaluate_gpu.run(debug_dir=debug_dir, st_reid=opt.st_reid)
+evaluation = evaluate_gpu.run(
+    results_file=str(project_config.results_path),
+    debug_dir=debug_dir,
+    st_reid_dist=smoothed_distribution,
+)
 evaluation.model_name = opt.name
 evaluation.dataset_name = opt.dataset_name
 
 logging.info("Saving result to %s", result)
 with open(result, "a", encoding="utf-8") as f:
     f.write(str(evaluation.all_queries()) + "\n")
-
-# evaluation.plot_curve(
-#     save_dir=f"./model/{opt.name}/plots",
-#     markersize=2,
-# )

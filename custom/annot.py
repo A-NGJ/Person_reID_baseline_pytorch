@@ -434,13 +434,11 @@ def img_by_person_id(
     for file_ in src.glob(glob):
         file_ = Path(file_)
         person_id, camera_id = file_.name.split("_")[:2]
-        # person_id = person_id.lstrip("0")
-        # if person_id == "":
-        #     # Person ID is 0
-        #     person_id = 0
-        # else:
-        #     person_id = int(person_id)
-        person_id = int(person_id)
+
+        try:
+            person_id = int(person_id)
+        except ValueError:
+            person_id = -1
         camera_id = re.search(r"(?<=c)(\d+)", camera_id)
         if camera_id is None:
             raise AttributeError(f"Could not parse camera ID from {file_}")

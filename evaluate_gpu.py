@@ -6,6 +6,7 @@ from typing import (
     Any,
     Dict,
     List,
+    Optional,
     Sequence,
     Union,
 )
@@ -136,7 +137,7 @@ def joint_metric(
     query_camera: int,
     query_timestamp: float,
     similarity: np.ndarray,
-    probabilities: dict,
+    probabilities: np.ndarray,
     cameras: np.ndarray,
     timestamps: np.ndarray,
     lambda_sim: float = 1.0,
@@ -149,10 +150,6 @@ def joint_metric(
     of the time interval between appearance in two cameras.
     """
     joint = np.zeros_like(similarity)
-    timestamp_mean = np.mean(timestamps)
-    timestamp_std = np.std(timestamps)
-    timestamps = (timestamps - timestamp_mean) / timestamp_std
-    query_timestamp = float((query_timestamp - timestamp_mean) / timestamp_std)
 
     sim_score = logistic_smoothing(similarity, lambda_sim, gamma_sim)
     sim_score = np.array(sim_score)
@@ -160,11 +157,15 @@ def joint_metric(
         if cam == query_camera:
             continue
         delta_t = abs(timestamps[cam_idx] - query_timestamp)
-        prob_score = logistic_smoothing(
-            sum(probabilities[query_camera - 1, cam - 1].evaluate(delta_t)),
-            lambda_prob,
-            gamma_prob,
-        )
+
+        if probabilities[query_camera - 1, cam - 1, 0] is None:
+            prob_score = 0.0
+        else:
+            prob_score = logistic_smoothing(
+                probabilities[query_camera - 1, cam - 1, delta_t],
+                lambda_prob,
+                gamma_prob,
+            )
 
         joint[cam_idx] += sim_score[cam_idx] * prob_score
 
@@ -176,7 +177,7 @@ def evaluate(
     query_id: int,
     filenames: Dict[str, List[Dict[str, Any]]],
     debug_dir: str = "",
-    st_reid: bool = False,
+    st_reid_dist: Optional[np.ndarray] = None,
 ):
     """
     Computes average precision and CMC for a given query and gallery.
@@ -191,8 +192,8 @@ def evaluate(
         The filenames of the gallery images.
     debug_dir : str
         The directory to save debug images.
-    st_reid : bool
-        Whether to use the ST-ReID method.
+    st_reid_dist : Optional[dict]
+        The dictionary containing the probability density functions of the time interval
 
     Returns
     -------
@@ -215,12 +216,12 @@ def evaluate(
     # Convert to numpy array
     score = score.numpy()
 
-    if st_reid:
+    if st_reid_dist is not None:
         score = joint_metric(
             query_camera=results["query_cam"][query_id],
             query_timestamp=results["query_timestamp"][query_id],
             similarity=score,
-            probabilities=results["context_distribution"],
+            probabilities=st_reid_dist,
             cameras=results["gallery_cam"],
             timestamps=results["gallery_timestamp"],
         )
@@ -297,8 +298,6 @@ def load_results(results_file: str = "pytorch_result.mat") -> Dict[str, Any]:
     gallery_cam = result["gallery_cam"][0]
     gallery_label = result["gallery_label"][0]
     gallery_timestamp = result["gallery_timestamp"][0]
-    with cfg.context_distribution_path.open("rb") as f:
-        context_distribution = pickle.load(f)
 
     return {
         "query_feature": query_feature,
@@ -309,14 +308,29 @@ def load_results(results_file: str = "pytorch_result.mat") -> Dict[str, Any]:
         "gallery_cam": gallery_cam,
         "gallery_label": gallery_label,
         "gallery_timestamp": gallery_timestamp,
-        "context_distribution": context_distribution,
     }
 
 
 def run(
-    results_file: str = "pytorch_result.mat", debug_dir: str = "", st_reid: bool = False
+    results_file: str = "pytorch_result.mat",
+    debug_dir: str = "",
+    st_reid_dist: Optional[np.ndarray] = None,
 ):
     results = load_results(results_file)
+
+    # precompute st_reid_dist for a range 0 to 50000
+    if st_reid_dist is not None:
+        data_points_num = 1000000
+        st_reid_dist = np.repeat(
+            st_reid_dist[:, :, np.newaxis], data_points_num, axis=2
+        )
+        vals = np.linspace(0, data_points_num, data_points_num)
+        for i in range(st_reid_dist.shape[0]):
+            for j in range(st_reid_dist.shape[1]):
+                if st_reid_dist[i, j, 0] is not None:
+                    st_reid_dist[i, j, :] = np.array(
+                        st_reid_dist[i, j, 0].evaluate(vals)
+                    )
 
     filenames = {}  # list of gallery frames and their resolutions
     if debug_dir:
@@ -335,7 +349,9 @@ def run(
     for i, _ in tqdm(
         enumerate(query_labels), total=len(query_labels), desc="Evaluating"
     ):
-        ap_tmp, cmc_tmp = evaluate(results, i, filenames, debug_dir, st_reid=st_reid)
+        ap_tmp, cmc_tmp = evaluate(
+            results, i, filenames, debug_dir, st_reid_dist=st_reid_dist
+        )
         if cmc_tmp[0] == -1:
             continue
         cmc += cmc_tmp

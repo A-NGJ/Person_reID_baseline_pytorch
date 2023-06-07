@@ -2,6 +2,7 @@ from collections import defaultdict
 from pathlib import Path
 import re
 
+import numpy as np
 from PIL import Image
 import torch
 from torchvision import transforms
@@ -56,13 +57,14 @@ class ReIDImageDataset(Dataset):
         if camera is None:
             raise ValueError(f"Could not find camera id in {file_name}")
         camera = int(camera.group(1))
-        timestamp = int(file_name.split(".")[0].split("_")[-1])
+        # timestamp = int(file_name.split(".")[0].split("_")[-1])
+        timestamp = int(file_name.split("_")[2].split(".")[0])
 
         return {
             "image": image,
             "label": label,
             "camera": camera,
-            "timestamp": timestamp,
+            "timestamp": (timestamp, timestamp),
         }
 
 
@@ -78,27 +80,56 @@ class ContextVideoDataset(Dataset):
         self.transform = transform
         self.dataset = ImageFolder(root_dir)
         self.imgs = self.dataset.imgs[::step]
-        self.classes = self.dataset.classes
-        self.img_by_label = defaultdict(lambda: defaultdict(list))
-        self.timestamp_by_label = defaultdict(lambda: defaultdict(list))
-        self.frames_by_label = defaultdict(lambda: defaultdict(list))
+        self.classes = self.dataset.classes[::step]
+        self.img_by_label = {}  # defaultdict(lambda: defaultdict(list))
+        self.timestamp_by_label = {}  # defaultdict(lambda: defaultdict(list))
+        self.frames_by_label = {}  # defaultdict(lambda: defaultdict(list))
 
-        for image, label in self.imgs:
+        for image, _ in self.imgs:
+            try:
+                label = int(Path(image).name.split("_")[0])
+            except ValueError:
+                label = -1
+            if label not in self.img_by_label:
+                self.img_by_label[label] = {}
+                self.timestamp_by_label[label] = {}
+                self.frames_by_label[label] = {}
+
             camera_id = re.search(r"c(\d+)", Path(image).name)
             if camera_id is None:
                 raise ValueError(f"Could not find camera id in {Path(image).name}")
             camera_id = int(camera_id.group(1))
+            if camera_id not in self.img_by_label[label]:
+                self.img_by_label[label][camera_id] = []
+                self.timestamp_by_label[label][camera_id] = []
+                self.frames_by_label[label][camera_id] = []
+
             self.img_by_label[label][camera_id].append(image)
             self.timestamp_by_label[label][camera_id].append(
                 int(Path(image).name.split(".")[0].split("_")[-1])
             )
             self.frames_by_label[label][camera_id].append(image)
 
+        # sort by timestamp
+        # pylint: disable=consider-using-dict-items
+        for label in self.timestamp_by_label:
+            for camera in self.timestamp_by_label[label]:
+                sort_indices = np.argsort(self.timestamp_by_label[label][camera])
+                self.img_by_label[label][camera] = np.array(
+                    self.img_by_label[label][camera]
+                )[sort_indices]
+                self.timestamp_by_label[label][camera] = np.array(
+                    self.timestamp_by_label[label][camera]
+                )[sort_indices]
+                self.frames_by_label[label][camera] = np.array(
+                    self.frames_by_label[label][camera]
+                )[sort_indices]
+
     def __len__(self):
         return len(self.imgs)
 
     def __getitem__(self, idx: int):
-        image_path, _ = self.dataset.imgs[idx]
+        image_path, _ = self.imgs[idx]
         try:
             image = Image.open(image_path).convert("RGB")
         except OSError:
