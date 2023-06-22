@@ -23,113 +23,12 @@ cfg = Config.from_json("config/config.json")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(message)s")
 
 
-class Result:
-    def __init__(self, results: dict, model_name: str = "", dataset_name: str = ""):
-        self.results = results
-        self.model_name = model_name
-        self.dataset_name = dataset_name
-
-    def all_queries(self):
-        return self.results  # [min(self.results.keys())]
-
-    def plot_curve(
-        self,
-        linewidth: float = 1.0,
-        markersize: float = 1.0,
-        save_dir: str = "",
-    ):
-        """
-        Plot results curve.
-        If save dir is provided, save the plot to the directory.
-        Otherwise, show the plot.
-
-        Parameters
-        ----------
-        save_dir : str
-            The directory to save the plot.
-        """
-        plot_kwargs = {
-            "linewidth": linewidth,
-            "markersize": markersize,
-        }
-
-        # define subplots with 1920x1080 resolution
-        fig, ax = plt.subplots(figsize=(19.2, 10.8))
-        ax.plot(
-            self.results.keys(),
-            [self.results[k]["mAP"] for k in self.results.keys()],
-            "o-",
-            label="mAP",
-            **plot_kwargs,
-        )
-        ax.plot(
-            self.results.keys(),
-            [self.results[k]["rank10"] for k in self.results.keys()],
-            "o-",
-            label="Rank-10",
-            **plot_kwargs,
-        )
-        ax.plot(
-            self.results.keys(),
-            [self.results[k]["rank5"] for k in self.results.keys()],
-            "o-",
-            label="Rank-5",
-            **plot_kwargs,
-        )
-        ax.plot(
-            self.results.keys(),
-            [self.results[k]["rank1"] for k in self.results.keys()],
-            "o-",
-            label="Rank-1",
-            **plot_kwargs,
-        )
-
-        counts = np.array([self.results[k]["count"] for k in self.results.keys()])
-        counts_max = counts.max()
-        # normalize counts
-        counts = counts / counts_max
-        # Plot on second axis the number of images per threshold
-        ax.plot(
-            self.results.keys(),
-            counts,
-            "--",
-            label=f"Normalized count. Max value: {counts_max:.2f}",
-            alpha=0.5,
-            linewidth=2.0,
-            color="black",
-        )
-
-        ax.set_xlabel("Image size threshold")
-        ax.set_ylabel("Count")
-        if self.model_name and self.dataset_name:
-            ax.set_title(
-                f"Evaluation results of {self.model_name} on {self.dataset_name}"
-            )
-        else:
-            ax.set_title("Evaluation results")
-        # Set the minor ticks positions on y-axis
-        minor_ticks = np.arange(0, 1, 0.05)
-        ax.set_yticks(minor_ticks, minor=True)
-        # Set grid on minor ticks
-        ax.grid(which="minor", alpha=0.2)
-
-        ax.grid()
-        ax.legend()
-
-        if save_dir:
-            if not os.path.exists(save_dir):
-                os.mkdir(save_dir)
-            fig.savefig(f"{save_dir}/results_{self.dataset_name}.png")
-        else:
-            plt.show()
-
-
 def logistic_smoothing(
     x: Union[np.ndarray, float],
     lambda_: float,
     gamma: float,
 ) -> Union[np.ndarray, float]:
-    return 1 / (1 + np.exp(-lambda_ * (x - gamma)))
+    return 1 / (1 + lambda_ * np.exp(-gamma * x))
 
 
 def joint_metric(
@@ -315,10 +214,10 @@ def run(
     results_file: str = "pytorch_result.mat",
     debug_dir: str = "",
     st_reid_dist: Optional[np.ndarray] = None,
-):
+) -> dict:
     results = load_results(results_file)
 
-    # precompute st_reid_dist for a range 0 to 50000
+    # precompute st_reid_dist for a range 0 to 1_000_000
     if st_reid_dist is not None:
         data_points_num = 1000000
         st_reid_dist = np.repeat(
@@ -340,7 +239,7 @@ def run(
     logging.info(f"Query feature shape: {results['query_feature'].shape}")
     evaluation_results = {}
 
-    query_labels = results["query_label"]  # [query_index]
+    query_labels = results["query_label"]
     if len(query_labels) == 1:
         print()
 
@@ -370,7 +269,7 @@ def run(
         "mAP": avg_precision / len(query_labels),
         "count": len(query_labels),
     }
-    return Result(evaluation_results)
+    return evaluation_results
 
 
 if __name__ == "__main__":

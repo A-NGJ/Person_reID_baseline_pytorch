@@ -12,6 +12,7 @@ def smoothed_probability(
     cameras: Sequence,
     timestamps_in: Sequence,
     timestamps_out: Sequence,
+    plot=False,
 ) -> Tuple[np.ndarray, dict]:
     """
     Probability density function of the time interval between appearance in two cameras.
@@ -46,22 +47,26 @@ def smoothed_probability(
             )
             smoothed_densities[ci - 1, cj - 1] = kde_model
 
-    # Plot smoothed densities for camera 1 and all other cameras, then for camera 2 and all other cameras, etc.
-    uniq_cameras = np.unique(cameras)
-    for i in uniq_cameras:
-        print(f"Plotting smoothed densities for camera {i}")
-        plt.figure()
-        for j in uniq_cameras[uniq_cameras != i]:
-            if isinstance(smoothed_densities[i - 1, j - 1], gaussian_kde):
-                print(f"Plotting smoothed densities for camera {i} and {j}")
-                plt.plot(
-                    np.linspace(0, 25000, 1000),
-                    smoothed_densities[i - 1, j - 1].evaluate(
-                        np.linspace(0, 25000, 1000)
-                    ),
-                    label=f"{i} ->j {j}",
-                )
-        plt.legend()
-        plt.savefig(f"plots/smoothed_densities_{i}.png")
+    if plot:
+        # Plot smoothed densities for camera 1 and all other cameras, then for camera 2 and all other cameras, etc.
+        uniq_cameras = np.unique(cameras)
+        for i in uniq_cameras:
+            plt.figure()
+            for j in uniq_cameras[uniq_cameras != i]:
+                if isinstance(smoothed_densities[i - 1, j - 1], gaussian_kde):
+                    plt.plot(
+                        np.linspace(0, 25000, 1000),
+                        smoothed_densities[i - 1, j - 1].evaluate(
+                            np.linspace(0, 25000, 1000)
+                        ),
+                        label=f"{i} -> {j}",
+                    )
+            plt.legend()
+            plt.xlabel("Time interval")
+            plt.ylabel("Probability density")
+            plt.title(
+                "Probability density of time interval between appearance in two cameras"
+            )
+            plt.savefig(f"plots/smoothed_densities_{i}.png")
 
     return smoothed_densities, histograms

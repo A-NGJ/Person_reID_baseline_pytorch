@@ -145,7 +145,7 @@ for str_id in str_ids:
     if id >= 0:
         gpu_ids.append(id)
 
-logging.info(f"We use the scale: {opt.ms}")
+logging.info(f"Using scale: {opt.ms}")
 str_ms = opt.ms.split(",")
 ms = []
 for s in str_ms:
@@ -262,7 +262,6 @@ def fliplr(img):
 
 def extract_feature(model, dataloaders, name: str):
     data_len = len(dataloaders.dataset)
-    print("data len", data_len)
     features = torch.FloatTensor(data_len, opt.linear_num)
     labels = torch.IntTensor(data_len)
     cameras = torch.IntTensor(data_len)
@@ -414,7 +413,6 @@ model = fuse_all_conv_bn(model)
 dummy_forward_input = torch.rand(opt.batchsize, 3, h, w).cuda()
 model = torch.jit.trace(model, dummy_forward_input)
 
-smoothed_distribution = None
 if opt.st_reid:
     train_data = extract_context_feature(
         dataloaders["train"],
@@ -428,6 +426,9 @@ if opt.st_reid:
         timestamps_in=train_data["timestamps_in"].numpy(),
         timestamps_out=train_data["timestamps_out"].numpy(),
     )
+else:
+    smoothed_distribution = None
+
 if not project_config.results_path.exists() or opt.no_cache:
     # Extract feature
     since = time.time()
@@ -474,9 +475,7 @@ evaluation = evaluate_gpu.run(
     debug_dir=debug_dir,
     st_reid_dist=smoothed_distribution,
 )
-evaluation.model_name = opt.name
-evaluation.dataset_name = opt.dataset_name
 
 logging.info("Saving result to %s", result)
 with open(result, "a", encoding="utf-8") as f:
-    f.write(str(evaluation.all_queries()) + "\n")
+    f.write(" ".join([evaluation, opt.name, opt.dataset_name]) + "\n")

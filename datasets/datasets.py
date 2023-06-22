@@ -57,7 +57,6 @@ class ReIDImageDataset(Dataset):
         if camera is None:
             raise ValueError(f"Could not find camera id in {file_name}")
         camera = int(camera.group(1))
-        # timestamp = int(file_name.split(".")[0].split("_")[-1])
         timestamp = int(file_name.split("_")[2].split(".")[0])
 
         return {
@@ -81,9 +80,9 @@ class ContextVideoDataset(Dataset):
         self.dataset = ImageFolder(root_dir)
         self.imgs = self.dataset.imgs[::step]
         self.classes = self.dataset.classes[::step]
-        self.img_by_label = {}  # defaultdict(lambda: defaultdict(list))
-        self.timestamp_by_label = {}  # defaultdict(lambda: defaultdict(list))
-        self.frames_by_label = {}  # defaultdict(lambda: defaultdict(list))
+        self.img_by_label = {}
+        self.timestamp_by_label = {}
+        self.frames_by_label = {}
 
         for image, _ in self.imgs:
             try:
