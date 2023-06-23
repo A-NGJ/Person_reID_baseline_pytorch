@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+from pathlib import Path
 import shutil
 import time
 from PIL import Image
@@ -19,69 +20,51 @@ from torch import nn
 # import torch.optim as optim
 from torch.autograd import Variable
 from torch.backends import cudnn
-import numpy as np
 
 # import torchvision
 from torchvision import transforms
-import scipy.io
+from scipy.io import savemat
 import yaml
-from model import (
-    FtNet,
-    ft_net_dense,
-    ft_net_hr,
-    ft_net_swin,
-    ft_net_swinv2,
-    ft_net_efficient,
-    ft_net_NAS,
-    ft_net_convnext,
-    PCB,
-    PCB_test,
-)
+
+from model import FtNet
 from utils import fuse_all_conv_bn
 import evaluate_gpu
-
 from datasets.datasets import DataLoaderFactory
 import train_context
 from config import Config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(message)s")
-project_config = Config.from_json("config/config.json")
 
 ######################################################################
 parser = argparse.ArgumentParser(description="Test")
 parser.add_argument(
-    "--gpu-ids", default="0", type=str, help="gpu_ids: e.g. 0  0,1,2  0,2"
+    "-f",
+    type=str,
+    metavar="CONFIG_FILE",
+    default="config.json",
+    help="JSON file for configuration. Using command line arguments overrides values in JSON file.",
 )
-parser.add_argument("--which-epoch", default="last", type=str, help="0,1,2,3...or last")
+parser.add_argument("--gpu-ids", type=str, help="gpu_ids: e.g. 0  0,1,2  0,2")
 parser.add_argument(
-    "--test-dir", default="../Market/pytorch", type=str, help="./test_data"
+    "--data-dir",
+    type=str,
+    help="Directory with test data",
+    required=True,
 )
-parser.add_argument("--name", default="ft_ResNet50", type=str, help="save model path")
-parser.add_argument("--batchsize", default=256, type=int, help="batchsize")
+parser.add_argument("--model-name", type=str, help="Model name to use")
+parser.add_argument("--batchsize", type=int, help="batchsize")
 parser.add_argument(
     "--linear-num",
-    default=512,
     type=int,
     help="feature dimension: 512 or default or 0 (linear=False)",
 )
-parser.add_argument("--use-dense", action="store_true", help="use densenet121")
-parser.add_argument("--use-efficient", action="store_true", help="use efficient-b4")
-parser.add_argument("--use-hr", action="store_true", help="use hr18 net")
-parser.add_argument("--PCB", action="store_true", help="use PCB")
-parser.add_argument("--multi", action="store_true", help="use multiple query")
-parser.add_argument("--fp16", action="store_true", help="use fp16.")
-parser.add_argument(
-    "--ms", default="1", type=str, help="multiple_scale: e.g. 1 1,1.1  1,1.1,1.2"
-)
-parser.add_argument(
-    "--dataset-name", type=str, help="Dataset name. So far used only for plot title"
-)
+parser.add_argument("--ms", type=str, help="multiple_scale: e.g. 1 1,1.1  1,1.1,1.2")
 parser.add_argument(
     "--dataloader",
     type=str,
     choices=["reid", "context_video"],
-    default="reid",
     help="Dataloader name",
+    dest="test_dataloader",
 )
 parser.add_argument(
     "--step",
@@ -99,141 +82,117 @@ parser.add_argument(
     action="store_true",
     help="Do not use cached features",
 )
+parser.add_argument(
+    "--debug",
+    action="store_true",
+    dest="debug_test",
+    help="Debug test",
+)
 
 opt = parser.parse_args()
-###load config###
-# load the training config
-config_path = os.path.join("./model", opt.name, "opts.yaml")
-with open(config_path, "r") as stream:
-    config = yaml.load(
-        stream, Loader=yaml.FullLoader
-    )  # for the new pyyaml via 'conda install pyyaml'
-opt.fp16 = config["fp16"]
-opt.PCB = config["PCB"]
-opt.use_dense = config["use_dense"]
-opt.use_NAS = config["use_NAS"]
-opt.stride = config["stride"]
-if "use_swin" in config:
-    opt.use_swin = config["use_swin"]
-if "use_swinv2" in config:
-    opt.use_swinv2 = config["use_swinv2"]
-if "use_convnext" in config:
-    opt.use_convnext = config["use_convnext"]
-if "use_efficient" in config:
-    opt.use_efficient = config["use_efficient"]
-if "use_hr" in config:
-    opt.use_hr = config["use_hr"]
+if opt.gpu_ids:
+    opt.gpu_ids = [int(gpu_id) for gpu_id in opt.gpu_ids.split(",") if int(gpu_id) >= 0]
 
-if "nclasses" in config:  # tp compatible with old config files
-    opt.nclasses = config["nclasses"]
-else:
-    opt.nclasses = 751
+with Path("config", opt.f).open() as f:
+    cfg_json = json.load(f)
 
-if "ibn" in config:
-    opt.ibn = config["ibn"]
-if "linear_num" in config:
-    opt.linear_num = config["linear_num"]
-
-str_ids = opt.gpu_ids.split(",")
-# which_epoch = opt.which_epoch
-name = opt.name
-test_dir = opt.test_dir
-
-gpu_ids = []
-for str_id in str_ids:
-    id = int(str_id)
-    if id >= 0:
-        gpu_ids.append(id)
-
-logging.info(f"Using scale: {opt.ms}")
-str_ms = opt.ms.split(",")
-ms = []
-for s in str_ms:
-    s_f = float(s)
-    ms.append(math.sqrt(s_f))
+# override config with command line arguments
+cfg_json.update({k: v for k, v in vars(opt).items() if v is not None})
+cfg = Config(**cfg_json)
 
 # set gpu ids
-if len(gpu_ids) > 0:
-    torch.cuda.set_device(gpu_ids[0])
+if len(cfg.gpu_ids) > 0:
+    torch.cuda.set_device(cfg.gpu_ids[0])
     cudnn.benchmark = True
+
+###load config###
+# backward compatibility
+config_dir = Path("./model", cfg.model_name)
+if (config_dir / "opts.yaml").exists():
+    with (config_dir / "opts.yaml").open("r") as stream:
+        config = yaml.load(
+            stream, Loader=yaml.FullLoader
+        )  # for the new pyyaml via 'conda install pyyaml'
+else:
+    with (config_dir / cfg.f).open("r") as f:
+        config = json.load(f)
+
+cfg.stride = config["stride"]
+
+if "nclasses" in config:  # tp compatible with old config files
+    cfg.nclasses = config["nclasses"]
+else:
+    cfg.nclasses = 751
+if "linear_num" in config:
+    cfg.linear_num = config["linear_num"]
+
+
+logging.info(f"Using scale: {opt.ms}")
+if opt.ms:
+    cfg.ms = [math.sqrt(float(s)) for s in opt.ms.split(",")]
+
 
 ######################################################################
 # Load Data
-# ---------
-#
-# We will use torchvision and torch.utils.data packages for loading the
-# data.
-#
-if opt.use_swin:
-    h, w = 224, 224
-else:
-    h, w = 256, 128
 
 data_transforms = transforms.Compose(
     [
-        transforms.Resize((h, w), interpolation=transforms.InterpolationMode.BICUBIC),
+        transforms.Resize(
+            (cfg.height, cfg.width), interpolation=transforms.InterpolationMode.BICUBIC
+        ),
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ]
 )
 
-if opt.PCB:
-    data_transforms = transforms.Compose(
-        [
-            transforms.Resize(
-                (384, 192), interpolation=transforms.InterpolationMode.BICUBIC
-            ),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ]
-    )
-    h, w = 384, 192
-
-debug_dir = f"{opt.test_dir}/debug"
 
 # Initialize data loaders
 dataloaders = {
     x: DataLoaderFactory(
-        project_config.height,
-        project_config.width,
+        cfg.height,
+        cfg.width,
     ).get(
-        opt.dataloader,
-        os.path.join(opt.test_dir, x),
+        cfg.test_dataloader,
+        os.path.join(cfg.data_dir, x),
         "test",
     )
     for x in ["query", "train"]
 }
 
 dataloaders["gallery"] = DataLoaderFactory(
-    project_config.height,
-    project_config.width,
+    cfg.height,
+    cfg.width,
     step=opt.step,
 ).get(
-    opt.dataloader,
-    os.path.join(opt.test_dir, "gallery"),
+    cfg.test_dataloader,
+    os.path.join(cfg.data_dir, "gallery"),
     "test",
 )
 
 # ==== DEBUG ====
-if os.path.exists(debug_dir):
-    shutil.rmtree(debug_dir)
-os.makedirs(debug_dir)
 
-with open(f"{debug_dir}/filenames.json", "w", encoding="utf-8") as rfile:
-    # save filenames with their total resolution
-    images = {}
-    for data_set in ["gallery", "query"]:
-        images[data_set] = []
-        for filename, _ in dataloaders[data_set].dataset.imgs:
-            image = Image.open(filename)
-            images[data_set].append(
-                {
-                    "path": filename,
-                    "resolution": image.size[0] * image.size[1],
-                }
-            )
-    json.dump(images, rfile, indent=4)
-# ===============
+debug_dir: str = ""
+if cfg.debug_test:
+    debug_dir = f"{cfg.data_dir}/debug"
+    if os.path.exists(debug_dir):
+        shutil.rmtree(debug_dir)
+    os.makedirs(debug_dir)
+
+    with open(f"{debug_dir}/filenames.json", "w", encoding="utf-8") as rfile:
+        # save filenames with their total resolution
+        images = {}
+        for data_set in ["gallery", "query"]:
+            images[data_set] = []
+            for filename, _ in dataloaders[data_set].dataset.imgs:
+                image = Image.open(filename)
+                images[data_set].append(
+                    {
+                        "path": filename,
+                        "resolution": image.size[0] * image.size[1],
+                    }
+                )
+        json.dump(images, rfile, indent=4)
+    # ===============
 class_names = dataloaders["query"].dataset.classes
 use_gpu = torch.cuda.is_available()
 
@@ -241,8 +200,8 @@ use_gpu = torch.cuda.is_available()
 ######################################################################
 # Load model
 # ---------------------------
-def load_network(network):
-    save_path = os.path.join("./model", name, f"net_{opt.which_epoch}.pth")
+def load_network(network, model_name: str):
+    save_path = os.path.join("./model", model_name, "net_last.pth")
     network.load_state_dict(torch.load(save_path))
     return network
 
@@ -260,23 +219,14 @@ def fliplr(img):
     return img_flip
 
 
-def extract_feature(model, dataloaders, name: str):
+def extract_feature(model, dataloaders, name: str, linear_num: int):
     data_len = len(dataloaders.dataset)
-    features = torch.FloatTensor(data_len, opt.linear_num)
+    features = torch.FloatTensor(data_len, linear_num)
     labels = torch.IntTensor(data_len)
     cameras = torch.IntTensor(data_len)
     timestamps = torch.IntTensor(data_len)
 
     count = 0
-    if opt.linear_num <= 0:
-        if opt.use_swin or opt.use_swinv2 or opt.use_dense or opt.use_convnext:
-            opt.linear_num = 1024
-        elif opt.use_efficient:
-            opt.linear_num = 1792
-        elif opt.use_NAS:
-            opt.linear_num = 4032
-        else:
-            opt.linear_num = 2048
 
     for iter, data in tqdm(
         enumerate(dataloaders),
@@ -286,18 +236,13 @@ def extract_feature(model, dataloaders, name: str):
         img = data["image"]
         batch_size: int = img.size(0)
         count += batch_size
-        ff = torch.FloatTensor(batch_size, opt.linear_num).zero_().cuda()
-
-        if opt.PCB:
-            ff = (
-                torch.FloatTensor(batch_size, 2048, 6).zero_().cuda()
-            )  # we have six parts
+        ff = torch.FloatTensor(batch_size, linear_num).zero_().cuda()
 
         for i in range(2):
             if i == 1:
                 img = fliplr(img)
             input_img = Variable(img.cuda())
-            for scale in ms:
+            for scale in cfg.ms:
                 if scale != 1:
                     # bicubic is only  available in pytorch>= 1.1
                     input_img = nn.functional.interpolate(
@@ -309,16 +254,8 @@ def extract_feature(model, dataloaders, name: str):
                 outputs = model(input_img)
                 ff += outputs
         # norm feature
-        if opt.PCB:
-            # feature size (n,2048,6)
-            # 1. To treat every part equally, I calculate the norm for every 2048-dim part feature.
-            # 2. To keep the cosine score==1, sqrt(6) is added to norm the whole feature (2048*6).
-            fnorm = torch.norm(ff, p=2, dim=1, keepdim=True) * np.sqrt(6)
-            ff = ff.div(fnorm.expand_as(ff))
-            ff = ff.view(ff.size(0), -1)
-        else:
-            fnorm = torch.norm(ff, p=2, dim=1, keepdim=True)
-            ff = ff.div(fnorm.expand_as(ff))
+        fnorm = torch.norm(ff, p=2, dim=1, keepdim=True)
+        ff = ff.div(fnorm.expand_as(ff))
 
         if iter == 0:
             features = torch.FloatTensor(len(dataloaders.dataset), ff.shape[1])
@@ -349,7 +286,6 @@ def extract_context_feature(dataloaders, batch_size: int, name: str):
         total=len(dataloaders),
         desc=f"Extracting {name} context features batch",
     ):
-        # batch_size = data["camera"].size(0)
         start: int = iter * batch_size
         end = min((iter + 1) * batch_size, len(dataloaders.dataset))
         cameras[start:end] = data["camera"]
@@ -368,35 +304,12 @@ def extract_context_feature(dataloaders, batch_size: int, name: str):
 ######################################################################
 # Load Collected data Trained model
 print("=" * 20 + "test" + "=" * 20)
-if opt.use_dense:
-    model_structure = ft_net_dense(
-        opt.nclasses, stride=opt.stride, linear_num=opt.linear_num
-    )
-elif opt.use_NAS:
-    model_structure = ft_net_NAS(opt.nclasses, linear_num=opt.linear_num)
-elif opt.use_swin:
-    model_structure = ft_net_swin(opt.nclasses, linear_num=opt.linear_num)
-elif opt.use_swinv2:
-    model_structure = ft_net_swinv2(opt.nclasses, (h, w), linear_num=opt.linear_num)
-elif opt.use_convnext:
-    model_structure = ft_net_convnext(opt.nclasses, linear_num=opt.linear_num)
-elif opt.use_efficient:
-    model_structure = ft_net_efficient(opt.nclasses, linear_num=opt.linear_num)
-elif opt.use_hr:
-    model_structure = ft_net_hr(opt.nclasses, linear_num=opt.linear_num)
-else:
-    model_structure = FtNet(opt.nclasses, stride=opt.stride, linear_num=opt.linear_num)
 
-if opt.PCB:
-    model_structure = PCB(opt.nclasses)
-
-model = load_network(model_structure)
+model_structure = FtNet(cfg.nclasses, stride=cfg.stride, linear_num=cfg.linear_num)
+model = load_network(model_structure, cfg.model_name)
 
 # Remove the final fc layer and classifier layer
-if opt.PCB:
-    model = PCB_test(model)
-else:
-    model.classifier.classifier = nn.Sequential()
+model.classifier.classifier = nn.Sequential()
 
 # Change to test mode
 model = model.eval()
@@ -410,7 +323,7 @@ model = fuse_all_conv_bn(model)
 # To do so, we can call `.trace` on the reparamtrized module with dummy inputs
 # expected by the module.
 # Comment out this following line if you do not want to trace.
-dummy_forward_input = torch.rand(opt.batchsize, 3, h, w).cuda()
+dummy_forward_input = torch.rand(opt.batchsize, 3, cfg.height, cfg.width).cuda()
 model = torch.jit.trace(model, dummy_forward_input)
 
 if opt.st_reid:
@@ -429,19 +342,21 @@ if opt.st_reid:
 else:
     smoothed_distribution = None
 
-if not project_config.results_path.exists() or opt.no_cache:
+if not Path(cfg.results_path).exists() or cfg.no_cache:
     # Extract feature
     since = time.time()
     with torch.no_grad():
         gallery_data = extract_feature(
             model,
             dataloaders["gallery"],
-            "gallery",
+            name="gallery",
+            linear_num=cfg.linear_num,
         )
         query_data = extract_feature(
             model,
             dataloaders["query"],
-            "query",
+            name="query",
+            linear_num=cfg.linear_num,
         )
 
     time_elapsed = time.time() - since
@@ -460,22 +375,22 @@ if not project_config.results_path.exists() or opt.no_cache:
         "query_cam": query_data["cameras"].numpy(),
         "query_timestamp": query_data["timestamps"].numpy(),
     }
-    scipy.io.savemat(project_config.results_path, result)
+    savemat(cfg.results_path, result)
 
 
-logging.info("Evaluating %s", opt.name)
-result = f"./model/{opt.name}/result.txt"
+logging.info("Evaluating %s", cfg.model_name)
+result = f"./model/{cfg.model_name}/result.txt"
 
 # save parser args to result.txt
 with open(result, "a", encoding="utf-8") as f:
-    f.write(str(opt) + "\n")
+    f.write(str(cfg) + "\n")
 
 evaluation = evaluate_gpu.run(
-    results_file=str(project_config.results_path),
+    results_file=str(cfg.results_path),
     debug_dir=debug_dir,
     st_reid_dist=smoothed_distribution,
 )
 
 logging.info("Saving result to %s", result)
 with open(result, "a", encoding="utf-8") as f:
-    f.write(" ".join([evaluation, opt.name, opt.dataset_name]) + "\n")
+    f.write(" ".join([str(evaluation), cfg.model_name]) + "\n")

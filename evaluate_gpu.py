@@ -1,25 +1,19 @@
 import json
 import os
-import pickle
 import logging
 from typing import (
     Any,
     Dict,
     List,
     Optional,
-    Sequence,
     Union,
 )
 import shutil
-import scipy.io
+from scipy.io import loadmat
 import torch
-import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
 
-from config import Config
-
-cfg = Config.from_json("config/config.json")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(message)s")
 
 
@@ -168,11 +162,12 @@ def compute_map(
     mask = np.in1d(index, good_index)
     rows_good = np.argwhere(mask).flatten()
 
-    for i, idx in enumerate(index[:10]):
-        shutil.copy(
-            filenames["gallery"][idx]["path"],
-            f"{debug_dir}/{i}r{rows_good[0]}_{filenames['gallery'][idx]['path'].split('/')[-1]}",
-        )
+    if debug_dir:
+        for i, idx in enumerate(index[:10]):
+            shutil.copy(
+                filenames["gallery"][idx]["path"],
+                f"{debug_dir}/{i}r{rows_good[0]}_{filenames['gallery'][idx]['path'].split('/')[-1]}",
+            )
 
     cmc[rows_good[0] :] = 1
     for i in range(ngood):
@@ -188,7 +183,7 @@ def compute_map(
 
 
 def load_results(results_file: str = "pytorch_result.mat") -> Dict[str, Any]:
-    result = scipy.io.loadmat(results_file)
+    result = loadmat(results_file)
     query_feature = torch.FloatTensor(result["query_f"]).cuda()
     query_cam = result["query_cam"][0]
     query_label = result["query_label"][0]
@@ -270,7 +265,3 @@ def run(
         "count": len(query_labels),
     }
     return evaluation_results
-
-
-if __name__ == "__main__":
-    run(debug_dir="/home/aleksandernagaj/Milestone/data/Milestone/pytorch/debug")

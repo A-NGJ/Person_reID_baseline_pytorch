@@ -4,6 +4,7 @@ from __future__ import print_function, division
 
 import argparse
 import logging
+import json
 import os
 from pathlib import Path
 import time
@@ -14,220 +15,111 @@ from torch import optim
 from torch.autograd import Variable
 from torchvision import datasets, transforms
 import torch.backends.cudnn as cudnn
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(message)s")
-
-
 import matplotlib
 
 matplotlib.use("agg")
 import matplotlib.pyplot as plt
 
-# from PIL import Image
-from model import (
-    ft_net,
-    ft_net_dense,
-    ft_net_hr,
-    ft_net_swin,
-    ft_net_swinv2,
-    ft_net_convnext,
-    ft_net_efficient,
-    ft_net_NAS,
-    PCB,
-)
-from random_erasing import RandomErasing
-from dgfolder import DGFolder
-import yaml
+from model import FtNet
+
 from shutil import copyfile
-from circle_loss import CircleLoss, convert_label_to_similarity
-from instance_loss import InstanceLoss
-from ODFA import ODFA
 
 import callbacks
+from config import Config
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(message)s")
 version = torch.__version__
-# fp16
-try:
-    from apex.fp16_utils import *
-    from apex import amp
-    from apex.optimizers import FusedSGD
-except ImportError:  # will be 3.x series
-    print(
-        "This is not an error. If you want to use low precision, i.e., fp16, please install the apex with cuda support (https://github.com/NVIDIA/apex) and update pytorch to 1.0"
-    )
-
-from pytorch_metric_learning import (
-    losses,
-    miners,
-)  # pip install pytorch-metric-learning
 
 ######################################################################
 # Options
 # --------
 parser = argparse.ArgumentParser(description="Training")
 parser.add_argument(
-    "--gpu_ids", default="0", type=str, help="gpu_ids: e.g. 0  0,1,2  0,2"
+    "-f",
+    type=str,
+    metavar="CONFIG_FILE",
+    default="config.json",
+    help="JSON file for configuration. Using command line arguments overrides values in JSON file.",
 )
-parser.add_argument("--name", default="ft_ResNet50", type=str, help="output model name")
+parser.add_argument("--gpu-ids", type=str, help="gpu_ids: e.g. 0  0,1,2  0,2")
+parser.add_argument(
+    "--model-name",
+    type=str,
+    help="output model name",
+)
 # data
-parser.add_argument(
-    "--data_dir", default="../Market/pytorch", type=str, help="training dir path"
-)
-parser.add_argument("--train_all", action="store_true", help="use all training data")
-parser.add_argument("--batchsize", default=32, type=int, help="batchsize")
-parser.add_argument(
-    "--color_jitter", action="store_true", help="use color jitter in training"
-)
-parser.add_argument(
-    "--erasing_p", default=0, type=float, help="Random Erasing probability, in [0,1]"
-)
-parser.add_argument(
-    "--DG",
-    action="store_true",
-    help="use extra DG-Market Dataset for training. Please download it from https://github.com/NVlabs/DG-Net#dg-market.",
-)
+parser.add_argument("--data-dir", type=str, help="training dir path")
+parser.add_argument("--batchsize", type=int, help="batchsize")
 # optimizer
-parser.add_argument("--lr", default=0.05, type=float, help="learning rate")
+parser.add_argument("--lr", type=float, help="learning rate")
 parser.add_argument(
-    "--weight_decay",
-    default=5e-4,
+    "--weight-decay",
     type=float,
     help="Weight decay. More Regularization Smaller Weight.",
 )
-parser.add_argument("--total_epoch", default=60, type=int, help="total training epoch")
-parser.add_argument(
-    "--fp16",
-    action="store_true",
-    help="use float16 instead of float32, which will save about 50%% memory",
-)
-parser.add_argument("--cosine", action="store_true", help="use cosine lrRate")
-parser.add_argument(
-    "--FSGD",
-    action="store_true",
-    help="use fused sgd, which will speed up trainig slightly. apex is needed.",
-)
+parser.add_argument("--epochs", type=int, help="Number of training epochs")
 # backbone
 parser.add_argument(
-    "--linear_num",
-    default=512,
+    "--linear-num",
     type=int,
     help="feature dimension: 512 or default or 0 (linear=False)",
 )
-parser.add_argument("--stride", default=2, type=int, help="stride")
-parser.add_argument("--droprate", default=0.5, type=float, help="drop rate")
-parser.add_argument("--use_dense", action="store_true", help="use densenet121")
-parser.add_argument(
-    "--use_swin", action="store_true", help="use swin transformer 224x224"
-)
-parser.add_argument("--use_swinv2", action="store_true", help="use swin transformerv2")
-parser.add_argument("--use_efficient", action="store_true", help="use efficientnet-b4")
-parser.add_argument("--use_NAS", action="store_true", help="use NAS")
-parser.add_argument("--use_hr", action="store_true", help="use hrNet")
-parser.add_argument("--use_convnext", action="store_true", help="use ConvNext")
-parser.add_argument("--ibn", action="store_true", help="use resnet+ibn")
-parser.add_argument("--PCB", action="store_true", help="use PCB+ResNet50")
+parser.add_argument("--stride", type=int, help="stride")
+parser.add_argument("--droprate", type=float, help="drop rate")
 # loss
 parser.add_argument(
-    "--warm_epoch", default=0, type=int, help="the first K epoch that needs warm up"
+    "--warm-epoch", type=int, help="the first K epoch that needs warm up"
 )
-parser.add_argument("--arcface", action="store_true", help="use ArcFace loss")
-parser.add_argument("--circle", action="store_true", help="use Circle loss")
-parser.add_argument("--cosface", action="store_true", help="use CosFace loss")
-parser.add_argument("--contrast", action="store_true", help="use contrast loss")
-parser.add_argument("--instance", action="store_true", help="use instance loss")
-parser.add_argument("--ins_gamma", default=32, type=int, help="gamma for instance loss")
-parser.add_argument("--triplet", action="store_true", help="use triplet loss")
-parser.add_argument("--lifted", action="store_true", help="use lifted loss")
-parser.add_argument("--sphere", action="store_true", help="use sphere loss")
-parser.add_argument("--adv", default=0.0, type=float, help="use adv loss as 1.0")
-parser.add_argument("--aiter", default=10, type=float, help="use adv loss with iter")
-parser.add_argument(
-    "--patience", default=5, type=int, help="patience for early stopping"
-)
+parser.add_argument("--patience", type=int, help="patience for early stopping")
 parser.add_argument("--verbose", action="store_true", help="verbose mode")
 
 opt = parser.parse_args()
+if opt.gpu_ids:
+    opt.gpu_ids = [int(gpu_id) for gpu_id in opt.gpu_ids.split(",") if int(gpu_id) >= 0]
 
-fp16 = opt.fp16
-data_dir = opt.data_dir
-name = opt.name
-str_ids = opt.gpu_ids.split(",")
-gpu_ids = []
-for str_id in str_ids:
-    gid = int(str_id)
-    if gid >= 0:
-        gpu_ids.append(gid)
+with Path("config", opt.f).open() as f:
+    cfg_json = json.load(f)
+
+# override config with command line arguments
+cfg_json.update({k: v for k, v in vars(opt).items() if v is not None})
+cfg = Config(**cfg_json)
 
 # set gpu ids
-if len(gpu_ids) > 0:
-    torch.cuda.set_device(gpu_ids[0])
+if len(cfg.gpu_ids) > 0:
+    torch.cuda.set_device(cfg.gpu_ids[0])
     cudnn.benchmark = True
-######################################################################
-# Load Data
-# ---------
-#
-
-if opt.use_swin:
-    h, w = 224, 224
-else:
-    h, w = 256, 128
 
 transform_train_list = [
-    # transforms.RandomResizedCrop(size=128, scale=(0.75,1.0), ratio=(0.75,1.3333), interpolation=3), #Image.BICUBIC)
-    transforms.Resize((h, w), interpolation=3),
+    transforms.Resize(
+        (cfg.height, cfg.width), interpolation=transforms.InterpolationMode.BICUBIC
+    ),
     transforms.Pad(10),
-    transforms.RandomCrop((h, w)),
+    transforms.RandomCrop((cfg.height, cfg.width)),
     transforms.RandomHorizontalFlip(),
     transforms.ToTensor(),
     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
 ]
 
 transform_val_list = [
-    transforms.Resize(size=(h, w), interpolation=3),  # Image.BICUBIC
+    transforms.Resize(
+        size=(cfg.height, cfg.width), interpolation=transforms.InterpolationMode.BICUBIC
+    ),
     transforms.ToTensor(),
     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
 ]
 
-if opt.PCB:
-    transform_train_list = [
-        transforms.Resize((384, 192), interpolation=3),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-    ]
-    transform_val_list = [
-        transforms.Resize(size=(384, 192), interpolation=3),  # Image.BICUBIC
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-    ]
 
-if opt.erasing_p > 0:
-    transform_train_list = transform_train_list + [
-        RandomErasing(probability=opt.erasing_p, mean=[0.0, 0.0, 0.0])
-    ]
-
-if opt.color_jitter:
-    transform_train_list = [
-        transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0)
-    ] + transform_train_list
-
-print(transform_train_list)
 data_transforms = {
     "train": transforms.Compose(transform_train_list),
     "val": transforms.Compose(transform_val_list),
 }
 
-
-train_all = ""
-if opt.train_all:
-    train_all = "_all"
-
 image_datasets = {}
 image_datasets["train"] = datasets.ImageFolder(
-    os.path.join(data_dir, "train" + train_all), data_transforms["train"]
+    os.path.join(cfg.data_dir, "train"), data_transforms["train"]
 )
 image_datasets["val"] = datasets.ImageFolder(
-    os.path.join(data_dir, "val"), data_transforms["val"]
+    os.path.join(cfg.data_dir, "val"), data_transforms["val"]
 )
 
 dataloaders = {
@@ -243,28 +135,11 @@ dataloaders = {
     for x in ["train", "val"]
 }
 
-# Use extra DG-Market Dataset for training. Please download it from https://github.com/NVlabs/DG-Net#dg-market.
-if opt.DG:
-    image_datasets["DG"] = DGFolder(
-        os.path.join("../DG-Market"), data_transforms["train"]
-    )
-    dataloaders["DG"] = torch.utils.data.DataLoader(
-        image_datasets["DG"],
-        batch_size=max(8, opt.batchsize // 2),
-        shuffle=True,
-        num_workers=2,
-        pin_memory=True,
-    )
-    DGloader_iter = enumerate(dataloaders["DG"])
-
 dataset_sizes = {x: len(image_datasets[x]) for x in ["train", "val"]}
 class_names = image_datasets["train"].classes
 
 use_gpu = torch.cuda.is_available()
 
-since = time.time()
-inputs, classes = next(iter(dataloaders["train"]))
-print(time.time() - since)
 ######################################################################
 # Training the model
 # ------------------
@@ -298,53 +173,25 @@ def train_model(
     criterion,
     optimizer,
     scheduler,
-    dir_name: Path,
-    num_epochs: int = 25,
-    patience: int = 5,
-    verbose: bool = False,
+    config: Config,
+    model_dir: Path,
 ):
     since = time.time()
+    last_model_wts: dict = model.state_dict()
 
-    # best_model_wts = model.state_dict()
-    # best_acc = 0.0
     warm_up = 0.1  # We start from the 0.1*lrRate
     warm_iteration = (
-        round(dataset_sizes["train"] / opt.batchsize) * opt.warm_epoch
+        round(dataset_sizes["train"] / config.batchsize) * config.warm_epoch
     )  # first 5 epoch
-    if opt.arcface:
-        criterion_arcface = losses.ArcFaceLoss(
-            num_classes=opt.nclasses, embedding_size=512
-        )
-    if opt.cosface:
-        criterion_cosface = losses.CosFaceLoss(
-            num_classes=opt.nclasses, embedding_size=512
-        )
-    if opt.circle:
-        criterion_circle = CircleLoss(
-            m=0.25, gamma=32
-        )  # gamma = 64 may lead to a better result.
-    if opt.triplet:
-        miner = miners.MultiSimilarityMiner()
-        criterion_triplet = losses.TripletMarginLoss(margin=0.3)
-    if opt.lifted:
-        criterion_lifted = losses.GeneralizedLiftedStructureLoss(
-            neg_margin=1, pos_margin=0
-        )
-    if opt.contrast:
-        criterion_contrast = losses.ContrastiveLoss(pos_margin=0, neg_margin=1)
-    if opt.instance:
-        criterion_instance = InstanceLoss(gamma=opt.ins_gamma)
-    if opt.sphere:
-        criterion_sphere = losses.SphereFaceLoss(
-            num_classes=opt.nclasses, embedding_size=512, margin=4
-        )
 
     # initialize the early_stopping object
-    early_stopping = callbacks.EarlyStopping(patience=patience, verbose=verbose)
+    early_stopping = callbacks.EarlyStopping(
+        patience=config.patience, verbose=config.verbose
+    )
 
-    for epoch in range(num_epochs):
-        print("Epoch {}/{}".format(epoch, num_epochs - 1))
-        print("-" * 10)
+    for epoch in range(config.epochs):
+        logging.info(f"Epoch {epoch}/{config.epochs - 1}")
+        print("-" * 40)
 
         # Each epoch has a training and validation phase
         for phase in ["train", "val"]:
@@ -356,22 +203,18 @@ def train_model(
             running_loss = 0.0
             running_corrects = 0.0
             # Iterate over data.
-            for iter, data in enumerate(dataloaders[phase]):
+            for _, data in enumerate(dataloaders[phase]):
                 # get the inputs
                 inputs, labels = data
-                now_batch_size, c, h, w = inputs.shape
-                if now_batch_size < opt.batchsize:  # skip the last batch
+                now_batch_size = inputs.shape[0]
+                if now_batch_size < config.batchsize:  # skip the last batch
                     continue
-                # print(inputs.shape)
                 # wrap them in Variable
                 if use_gpu:
                     inputs = Variable(inputs.cuda().detach())
                     labels = Variable(labels.cuda().detach())
                 else:
                     inputs, labels = Variable(inputs), Variable(labels)
-                # if we use low precision, input also need to be fp16
-                # if fp16:
-                #    inputs = inputs.half()
 
                 # zero the parameter gradients
                 optimizer.zero_grad()
@@ -383,133 +226,17 @@ def train_model(
                 else:
                     outputs = model(inputs)
 
-                if opt.adv > 0 and iter % opt.aiter == 0:
-                    inputs_adv = ODFA(model, inputs)
-                    outputs_adv = model(inputs_adv)
-
-                sm = nn.Softmax(dim=1)
-                log_sm = nn.LogSoftmax(dim=1)
-                return_feature = (
-                    opt.arcface
-                    or opt.cosface
-                    or opt.circle
-                    or opt.triplet
-                    or opt.contrast
-                    or opt.instance
-                    or opt.lifted
-                    or opt.sphere
-                )
-                if return_feature:
-                    logits, ff = outputs
-                    fnorm = torch.norm(ff, p=2, dim=1, keepdim=True)
-                    ff = ff.div(fnorm.expand_as(ff))
-                    loss = criterion(logits, labels)
-                    _, preds = torch.max(logits.data, 1)
-                    if opt.adv > 0 and iter % opt.aiter == 0:
-                        logits_adv, _ = outputs_adv
-                        loss += opt.adv * criterion(logits_adv, labels)
-                    if opt.arcface:
-                        loss += criterion_arcface(ff, labels) / now_batch_size
-                    if opt.cosface:
-                        loss += criterion_cosface(ff, labels) / now_batch_size
-                    if opt.circle:
-                        loss += (
-                            criterion_circle(*convert_label_to_similarity(ff, labels))
-                            / now_batch_size
-                        )
-                    if opt.triplet:
-                        hard_pairs = miner(ff, labels)
-                        loss += criterion_triplet(
-                            ff, labels, hard_pairs
-                        )  # /now_batch_size
-                    if opt.lifted:
-                        loss += criterion_lifted(ff, labels)  # /now_batch_size
-                    if opt.contrast:
-                        loss += criterion_contrast(ff, labels)  # /now_batch_size
-                    if opt.instance:
-                        loss += criterion_instance(ff) / now_batch_size
-                    if opt.sphere:
-                        loss += criterion_sphere(ff, labels) / now_batch_size
-                elif opt.PCB:  #  PCB
-                    part = {}
-                    num_part = 6
-                    for i in range(num_part):
-                        part[i] = outputs[i]
-
-                    score = (
-                        sm(part[0])
-                        + sm(part[1])
-                        + sm(part[2])
-                        + sm(part[3])
-                        + sm(part[4])
-                        + sm(part[5])
-                    )
-                    _, preds = torch.max(score.data, 1)
-
-                    loss = criterion(part[0], labels)
-                    for i in range(num_part - 1):
-                        loss += criterion(part[i + 1], labels)
-                else:  #  norm
-                    _, preds = torch.max(outputs.data, 1)
-                    loss = criterion(outputs, labels)
-                    if opt.adv > 0 and iter % opt.aiter == 0:
-                        loss += opt.adv * criterion(outputs_adv, labels)
+                _, preds = torch.max(outputs.data, 1)
+                loss = criterion(outputs, labels)
 
                 del inputs
-                # use extra DG Dataset (https://github.com/NVlabs/DG-Net#dg-market)
-                if opt.DG and phase == "train" and epoch > num_epochs * 0.1:
-                    try:
-                        _, batch = next(DGloader_iter)
-                    except StopIteration:
-                        DGloader_iter = enumerate(dataloaders["DG"])
-                        _, batch = next(DGloader_iter)
-                    except UnboundLocalError:  # first iteration
-                        DGloader_iter = enumerate(dataloaders["DG"])
-                        _, batch = next(DGloader_iter)
-
-                    inputs1, inputs2, _ = batch
-                    inputs1 = inputs1.cuda().detach()
-                    inputs2 = inputs2.cuda().detach()
-                    # use memory in vivo loss (https://arxiv.org/abs/1912.11164)
-                    outputs1 = model(inputs1)
-                    if return_feature:
-                        outputs1, _ = outputs1
-                    elif opt.PCB:
-                        for i in range(num_part):
-                            part[i] = outputs1[i]
-                        outputs1 = (
-                            part[0] + part[1] + part[2] + part[3] + part[4] + part[5]
-                        )
-                    outputs2 = model(inputs2)
-                    if return_feature:
-                        outputs2, _ = outputs2
-                    elif opt.PCB:
-                        for i in range(num_part):
-                            part[i] = outputs2[i]
-                        outputs2 = (
-                            part[0] + part[1] + part[2] + part[3] + part[4] + part[5]
-                        )
-
-                    mean_pred = sm(outputs1 + outputs2)
-                    kl_loss = nn.KLDivLoss(size_average=False)
-                    reg = (
-                        kl_loss(log_sm(outputs2), mean_pred)
-                        + kl_loss(log_sm(outputs1), mean_pred)
-                    ) / 2
-                    loss += 0.01 * reg
-                    del inputs1, inputs2
-                    # print(0.01*reg)
                 # backward + optimize only if in training phase
-                if epoch < opt.warm_epoch and phase == "train":
+                if epoch < config.warm_epoch and phase == "train":
                     warm_up = min(1.0, warm_up + 0.9 / warm_iteration)
                     loss = loss * warm_up
 
                 if phase == "train":
-                    if fp16:  # we use optimier to backward loss
-                        with amp.scale_loss(loss, optimizer) as scaled_loss:
-                            scaled_loss.backward()
-                    else:
-                        loss.backward()
+                    loss.backward()
                     optimizer.step()
                 # statistics
                 if (
@@ -524,7 +251,7 @@ def train_model(
             epoch_loss = running_loss / dataset_sizes[phase]
             epoch_acc = running_corrects / dataset_sizes[phase]
 
-            print(f"{phase} Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f}")
+            logging.info(f"{phase} Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f}")
 
             y_loss[phase].append(epoch_loss)
             y_err[phase].append(1.0 - epoch_acc)
@@ -535,32 +262,27 @@ def train_model(
                 early_stopping(epoch_loss)
 
                 if epoch % 10 == 9:
-                    save_network(model, str(dir_name / f"net_{epoch}.pth"))
-                draw_curve(epoch)
+                    save_network(model, str(model_dir / f"net_{epoch}.pth"))
+                draw_curve(epoch, cfg.model_name)
             if phase == "train":
                 scheduler.step()
         time_elapsed = time.time() - since
-        print(
-            "Training complete in {:.0f}m {:.0f}s".format(
-                time_elapsed // 60, time_elapsed % 60
-            )
+        logging.info(
+            f"Training complete in {time_elapsed // 60:.0f}m {time_elapsed % 60:.0f}s"
         )
-        print()
         if early_stopping.early_stop:
-            print("Early stopping")
+            logging.info("Early stopping")
             break
+        print("-" * 40)
 
     time_elapsed = time.time() - since
-    print(
-        "Training complete in {:.0f}m {:.0f}s".format(
-            time_elapsed // 60, time_elapsed % 60
-        )
+    logging.info(
+        f"Training complete in {time_elapsed // 60:.0f}m {time_elapsed % 60:.0f}s"
     )
-    # print('Best val Acc: {:4f}'.format(best_acc))
 
     # load best model weights
     model.load_state_dict(last_model_wts)
-    save_network(model, str(dir_name / "net_last.pth"))
+    save_network(model, str(model_dir / "net_last.pth"))
     return model
 
 
@@ -573,7 +295,7 @@ ax0 = fig.add_subplot(121, title="loss")
 ax1 = fig.add_subplot(122, title="top1err")
 
 
-def draw_curve(current_epoch):
+def draw_curve(current_epoch, model_name: str):
     x_epoch.append(current_epoch)
     ax0.plot(x_epoch, y_loss["train"], "bo-", label="train")
     ax0.plot(x_epoch, y_loss["val"], "ro-", label="val")
@@ -582,7 +304,7 @@ def draw_curve(current_epoch):
     if current_epoch == 0:
         ax0.legend()
         ax1.legend()
-    fig.savefig(os.path.join("./model", name, "train.jpg"))
+    fig.savefig(os.path.join("./model", model_name, "train.jpg"))
 
 
 ######################################################################
@@ -590,136 +312,38 @@ def draw_curve(current_epoch):
 # ---------------------------
 def save_network(network, save_path: str):
     torch.save(network.cpu().state_dict(), save_path)
-    if torch.cuda.is_available():
-        network.cuda(gpu_ids[0])
 
 
-######################################################################
-# Finetuning the convnet
-# ----------------------
-#
-# Load a pretrainied model and reset final fully connected layer.
-#
-
-return_feature = (
-    opt.arcface
-    or opt.cosface
-    or opt.circle
-    or opt.triplet
-    or opt.contrast
-    or opt.instance
-    or opt.lifted
-    or opt.sphere
+model = FtNet(
+    len(class_names),
+    cfg.droprate,
+    cfg.stride,
+    linear_num=cfg.linear_num,
 )
-
-if opt.use_dense:
-    model = ft_net_dense(
-        len(class_names),
-        opt.droprate,
-        opt.stride,
-        circle=return_feature,
-        linear_num=opt.linear_num,
-    )
-elif opt.use_NAS:
-    model = ft_net_NAS(len(class_names), opt.droprate, linear_num=opt.linear_num)
-elif opt.use_swin:
-    model = ft_net_swin(
-        len(class_names),
-        opt.droprate,
-        opt.stride,
-        circle=return_feature,
-        linear_num=opt.linear_num,
-    )
-elif opt.use_swinv2:
-    model = ft_net_swinv2(
-        len(class_names),
-        (h, w),
-        opt.droprate,
-        opt.stride,
-        circle=return_feature,
-        linear_num=opt.linear_num,
-    )
-elif opt.use_efficient:
-    model = ft_net_efficient(
-        len(class_names), opt.droprate, circle=return_feature, linear_num=opt.linear_num
-    )
-elif opt.use_hr:
-    model = ft_net_hr(
-        len(class_names), opt.droprate, circle=return_feature, linear_num=opt.linear_num
-    )
-elif opt.use_convnext:
-    model = ft_net_convnext(
-        len(class_names), opt.droprate, circle=return_feature, linear_num=opt.linear_num
-    )
-else:
-    model = ft_net(
-        len(class_names),
-        opt.droprate,
-        opt.stride,
-        circle=return_feature,
-        ibn=opt.ibn,
-        linear_num=opt.linear_num,
-    )
-
-if opt.PCB:
-    model = PCB(len(class_names))
-
-opt.nclasses = len(class_names)
+cfg.nclasses = len(class_names)
 
 print(model)
-
 # model to gpu
 model = model.cuda()
 
-optim_name = optim.SGD  # apex.optimizers.FusedSGD
-if opt.FSGD:  # apex is needed
-    optim_name = FusedSGD
+ignored_params = list(map(id, model.classifier.parameters()))
+base_params = filter(lambda p: id(p) not in ignored_params, model.parameters())
+classifier_params = model.classifier.parameters()
+optimizer_ft = optim.SGD(
+    [
+        {"params": base_params, "lr": 0.1 * cfg.lr},
+        {"params": classifier_params, "lr": cfg.lr},
+    ],
+    weight_decay=cfg.weight_decay,
+    momentum=0.9,
+    nesterov=True,
+)
 
-if not opt.PCB:
-    ignored_params = list(map(id, model.classifier.parameters()))
-    base_params = filter(lambda p: id(p) not in ignored_params, model.parameters())
-    classifier_params = model.classifier.parameters()
-    optimizer_ft = optim_name(
-        [
-            {"params": base_params, "lr": 0.1 * opt.lr},
-            {"params": classifier_params, "lr": opt.lr},
-        ],
-        weight_decay=opt.weight_decay,
-        momentum=0.9,
-        nesterov=True,
-    )
-else:
-    ignored_params = list(map(id, model.model.fc.parameters()))
-    ignored_params += (
-        list(map(id, model.classifier0.parameters()))
-        + list(map(id, model.classifier1.parameters()))
-        + list(map(id, model.classifier2.parameters()))
-        + list(map(id, model.classifier3.parameters()))
-        + list(map(id, model.classifier4.parameters()))
-        + list(map(id, model.classifier5.parameters()))
-        # +list(map(id, model.classifier6.parameters() ))
-        # +list(map(id, model.classifier7.parameters() ))
-    )
-    base_params = filter(lambda p: id(p) not in ignored_params, model.parameters())
-    classifier_params = filter(lambda p: id(p) in ignored_params, model.parameters())
-    optimizer_ft = optim_name(
-        [
-            {"params": base_params, "lr": 0.1 * opt.lr},
-            {"params": classifier_params, "lr": opt.lr},
-        ],
-        weight_decay=opt.weight_decay,
-        momentum=0.9,
-        nesterov=True,
-    )
 
 # Decay LR by a factor of 0.1 every 40 epochs
 exp_lr_scheduler = optim.lr_scheduler.StepLR(
-    optimizer_ft, step_size=opt.total_epoch * 2 // 3, gamma=0.1
+    optimizer_ft, step_size=cfg.epochs * 2 // 3, gamma=0.1
 )
-if opt.cosine:
-    exp_lr_scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer_ft, opt.total_epoch, eta_min=0.01 * opt.lr
-    )
 
 ######################################################################
 # Train and evaluate
@@ -727,32 +351,21 @@ if opt.cosine:
 #
 # It should take around 1-2 hours on GPU.
 #
-dir_name = Path("model") / opt.name
+dir_name = Path("model") / cfg.model_name
 if not dir_name.exists():
     dir_name.mkdir()
 # record every run
 copyfile("./train.py", dir_name / "train.py")
 copyfile("./model.py", dir_name / "model.py")
-
-# save opts
-with (dir_name / "opts.yaml").open("w") as fp:
-    yaml.dump(vars(opt), fp, default_flow_style=False)
+cfg.to_json(dir_name / "config.json")
 
 criterion = nn.CrossEntropyLoss()
-
-if fp16:
-    # model = network_to_half(model)
-    # optimizer_ft = FP16_Optimizer(optimizer_ft, static_loss_scale = 128.0)
-    model, optimizer_ft = amp.initialize(model, optimizer_ft, opt_level="O1")
-
 
 model = train_model(
     model,
     criterion,
     optimizer_ft,
     exp_lr_scheduler,
-    num_epochs=opt.total_epoch,
-    patience=opt.patience,
-    verbose=opt.verbose,
-    dir_name=dir_name,
+    config=cfg,
+    model_dir=dir_name,
 )

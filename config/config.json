@@ -1,5 +1,19 @@
 {
   "results_path": "cache/results.mat",
   "width": 128,
-  "height": 256
+  "height": 256,
+  "batchsize": 32,
+  "lr": 0.05,
+  "weight_decay": 0.0005,
+  "epochs": 60,
+  "linear_num": 512,
+  "stride": 2,
+  "droprate": 0.5,
+  "warm_epoch": 0,
+  "patience": 5,
+  "gpu_ids": [0],
+  "model_name": "resnet50",
+  "test_dataloader": "reid",
+  "step": 1,
+  "ms": [1]
 }
