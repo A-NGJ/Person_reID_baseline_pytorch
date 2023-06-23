@@ -20,10 +20,9 @@ from typing import (
 import cv2
 from sklearn.model_selection import train_test_split
 
+NOISE_DIR_NAME: str = "noise"
 
 logging.basicConfig(level=logging.INFO)
-
-NOISE_DIR_NAME = "noise"
 
 
 @dataclass
@@ -33,6 +32,9 @@ class Annotation:
 
 
 class Camera:
+    """
+    Class representing one camera scene.
+    """
     _scene_mapping = {}
     _scene_count = 0
 
@@ -40,10 +42,25 @@ class Camera:
         self,
         location: int,
         n: int,
-        sequence_n: str,
+        sequence_n: int,
         image: cv2.Mat,
         annotations: Union[List[Annotation], None] = None,
     ):
+        """
+        Parameters
+        ----------
+        location: int
+            Location of the camera.
+        n: int
+            Camera ID.
+        sequence_n: int
+            Sequence ID.
+        image: cv2.Mat
+            Image from the camera.
+        annotations: List[Annotation]
+            List of annotations.
+        """
+
         if location not in Camera._scene_mapping:
             Camera._scene_mapping[location] = Camera._scene_count
             Camera._scene_count += 1
@@ -176,7 +193,7 @@ def labelstudio2bbox(annot: dict) -> Camera:
             f"image {image_name} is missing camera inforamtion. Image name should be in format loc_cam01_0001."
         )
     camera = Camera(
-        location=camera_info.group(1),
+        location=int(camera_info.group(1)),
         n=int(camera_info.group(2)),
         sequence_n=int(camera_info.group(3)),
         image=image,

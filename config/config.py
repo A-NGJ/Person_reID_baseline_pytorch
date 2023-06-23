@@ -12,7 +12,6 @@ class Config:
     height: int
 
     def __post_init__(self):
-        self.context_distribution_path = Path(self.context_distribution_path)
         self.results_path = Path(self.results_path)
 
     @staticmethod
