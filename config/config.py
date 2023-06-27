@@ -23,13 +23,14 @@ class Config:
     warm_epoch: int
     patience: int
     gpu_ids: List[int]
-    data_dir: str
     model_name: str
+    model_dir: str
     ms: List[float]
     test_dataloader: str
+    data_dir: str = ""
+    nclasses: int = 0
     step: int = 1
     verbose: bool = False
-    nclasses: int = 512
     debug_test: bool = False
     no_cache: bool = False
     st_reid: bool = False
@@ -37,8 +38,10 @@ class Config:
     @staticmethod
     def from_json(path: Union[str, Path]):
         path = Path(path)
+
         with path.open() as f:
             data = json.load(f)
+        data["f"] = str(path)
 
         return Config(**data)
 

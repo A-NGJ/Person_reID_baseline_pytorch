@@ -13,7 +13,12 @@
   "patience": 5,
   "gpu_ids": [0],
   "model_name": "resnet50",
+  "model_dir": "model",
   "test_dataloader": "reid",
   "step": 1,
-  "ms": [1]
+  "ms": [1],
+  "verbose": false,
+  "debug_test": false,
+  "no_cache": false,
+  "st_reid": false
 }

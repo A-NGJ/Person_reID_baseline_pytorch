@@ -1,6 +1,11 @@
-pyyaml
-pretrainedmodels
-timm >= 0.6.0
-scipy
-efficientnet_pytorch
-pytorch_metric_learning
+matplotlib==3.7.1
+numpy==1.25.0
+opencv-python==4.7.0.72
+Pillow==9.5.0
+PyYAML==6.0
+scikit-learn==1.2.2
+scipy==1.11.0
+torch==2.0.1
+torchaudio==2.0.2
+torchvision==0.15.2
+tqdm==4.65.0

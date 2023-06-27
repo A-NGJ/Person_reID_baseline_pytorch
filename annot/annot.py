@@ -537,12 +537,12 @@ def create_dataset(data: dict, dest: Path):
     dest
     ├── gallery
     │   ├── 0000
-    │   │   ├── 0000_c0_01.jpg
-    │   │   ├── 0000_c0_02.jpg
-    │   │   └── 0000_c1_01.jpg
+    │   │   ├── 0000_c0_0001.jpg
+    │   │   ├── 0000_c0_0002.jpg
+    │   │   └── 0000_c1_0001.jpg
     ├── query
     │   ├── 0000
-    │   │   ├── 0000_c0_01.jpg
+    │   │   ├── 0000_c0_0001.jpg
     ├── train
     ...
 

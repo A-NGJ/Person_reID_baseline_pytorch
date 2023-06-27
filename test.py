@@ -36,7 +36,7 @@ from config import Config
 logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(message)s")
 
 ######################################################################
-parser = argparse.ArgumentParser(description="Test")
+parser = argparse.ArgumentParser(description="Model evaluation.")
 parser.add_argument(
     "-f",
     type=str,
@@ -93,12 +93,8 @@ opt = parser.parse_args()
 if opt.gpu_ids:
     opt.gpu_ids = [int(gpu_id) for gpu_id in opt.gpu_ids.split(",") if int(gpu_id) >= 0]
 
-with Path("config", opt.f).open() as f:
-    cfg_json = json.load(f)
-
-# override config with command line arguments
-cfg_json.update({k: v for k, v in vars(opt).items() if v is not None})
-cfg = Config(**cfg_json)
+cfg = Config.from_json(opt.f)
+cfg.update(**{k: v for k, v in vars(opt).items() if v is not None})
 
 # set gpu ids
 if len(cfg.gpu_ids) > 0:
@@ -107,14 +103,14 @@ if len(cfg.gpu_ids) > 0:
 
 ###load config###
 # backward compatibility
-config_dir = Path("./model", cfg.model_name)
-if (config_dir / "opts.yaml").exists():
-    with (config_dir / "opts.yaml").open("r") as stream:
+model_config_dir = Path(cfg.model_dir, cfg.model_name)
+if (model_config_dir / "opts.yaml").exists():
+    with (model_config_dir / "opts.yaml").open("r") as stream:
         config = yaml.load(
             stream, Loader=yaml.FullLoader
         )  # for the new pyyaml via 'conda install pyyaml'
 else:
-    with (config_dir / cfg.f).open("r") as f:
+    with (model_config_dir / cfg.f).open("r") as f:
         config = json.load(f)
 
 cfg.stride = config["stride"]
@@ -127,9 +123,9 @@ if "linear_num" in config:
     cfg.linear_num = config["linear_num"]
 
 
-logging.info(f"Using scale: {opt.ms}")
 if opt.ms:
     cfg.ms = [math.sqrt(float(s)) for s in opt.ms.split(",")]
+logging.info(f"Using scale: {cfg.ms}")
 
 
 ######################################################################

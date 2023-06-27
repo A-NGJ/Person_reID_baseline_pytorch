@@ -7,25 +7,23 @@ import logging
 import json
 import os
 from pathlib import Path
+from shutil import copyfile
 import time
 
+import matplotlib.pyplot as plt
 import torch
 from torch import nn
 from torch import optim
 from torch.autograd import Variable
-from torchvision import datasets, transforms
-import torch.backends.cudnn as cudnn
-import matplotlib
-
-matplotlib.use("agg")
-import matplotlib.pyplot as plt
-
-from model import FtNet
-
-from shutil import copyfile
+from torch.backends import cudnn
+from torchvision import (
+    datasets,
+    transforms,
+)
 
 import callbacks
 from config import Config
+from model import FtNet
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(message)s")
 version = torch.__version__
@@ -77,12 +75,8 @@ opt = parser.parse_args()
 if opt.gpu_ids:
     opt.gpu_ids = [int(gpu_id) for gpu_id in opt.gpu_ids.split(",") if int(gpu_id) >= 0]
 
-with Path("config", opt.f).open() as f:
-    cfg_json = json.load(f)
-
-# override config with command line arguments
-cfg_json.update({k: v for k, v in vars(opt).items() if v is not None})
-cfg = Config(**cfg_json)
+cfg = Config.from_json(opt.f)
+cfg.update(**{k: v for k, v in vars(opt).items() if v is not None})
 
 # set gpu ids
 if len(cfg.gpu_ids) > 0:

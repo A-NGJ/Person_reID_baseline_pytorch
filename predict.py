@@ -1,7 +1,4 @@
-from argparse import (
-    ArgumentParser,
-    Namespace,
-)
+from argparse import ArgumentParser
 import logging
 from pathlib import Path
 import shutil
@@ -21,36 +18,18 @@ from sklearn.metrics import silhouette_score
 import torch
 from torch.autograd import Variable
 
+from config import Config
 from datasets.datasets import DataLoaderFactory
 from model import FtNet
 from utils import fuse_all_conv_bn
 
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-WIDTH = 128
-HEIGHT = 256
 
-
-# def get_data_loader(data_path: Path, batch_size: int = 32) -> DataLoader:
-#     data_transforms = transforms.Compose(
-#         [
-#             transforms.Resize(
-#                 (HEIGHT, WIDTH), interpolation=transforms.InterpolationMode.BICUBIC
-#             ),
-#             transforms.ToTensor(),
-#             transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-#         ]
-#     )
-
-#     image_dataset = ReIDImageDataset(str(data_path), data_transforms)
-#     return DataLoader(
-#         image_dataset, batch_size=batch_size, shuffle=False, num_workers=16
-#     )
-
-
-def load_network(path: Path, device: torch.device):
+def load_network(cfg: Config, device: torch.device):
     network = FtNet(class_num=4042, return_f=True)
-    network.load_state_dict(torch.load(path))
+    network.load_state_dict(torch.load(Path(cfg.model_dir, cfg.model_name)))
     # remove final resnet50 fc layer
     # del network.model.fc
     # remove the final classifier layer
@@ -62,23 +41,25 @@ def load_network(path: Path, device: torch.device):
     network = network.to(device)
     network = fuse_all_conv_bn(network)
     # trace the forward method with PyTorch JIT so it runs faster.
-    network = torch.jit.trace(network, torch.rand(1, 3, HEIGHT, WIDTH).to(device))
+    network = torch.jit.trace(
+        network, torch.rand(1, 3, cfg.height, cfg.width).to(device)
+    )
     return network
 
 
 def extract_features(
-    network, dataloader, device: torch.device
+    network,
+    dataloader,
+    device: torch.device,
+    linear_size: int,
 ) -> Tuple[torch.FloatTensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    linear_size = 512
     data_len = len(dataloader.dataset)
     features = torch.FloatTensor(data_len, linear_size)
     label_tensor = torch.Tensor(data_len)
     camera_tensor = torch.Tensor(data_len)
     timestamp_tensor = torch.Tensor(data_len)
 
-    for iter, data in tqdm(
-        enumerate(dataloader), total=len(dataloader)
-    ):
+    for iter, data in tqdm(enumerate(dataloader), total=len(dataloader)):
         batch_features = (
             torch.FloatTensor(data["image"].size(0), linear_size).zero_().to(device)
         )
@@ -101,7 +82,7 @@ def extract_features(
         features[start:end, :] = batch_features
         label_tensor[start:end] = data["label"]
         camera_tensor[start:end] = data["camera"]
-        timestamp_tensor[start:end] = data["timestamp"]
+        timestamp_tensor[start:end] = data["timestamp"][-1]
 
     return features, label_tensor, camera_tensor, timestamp_tensor
 
@@ -131,24 +112,23 @@ def save_clusters(clusters: List[List[Path]], data_path: Path):
             shutil.copy(image_path, cluster_path)
 
 
-def main(args: Namespace):
+def main(cfg: Config):
     # check if cuda is available
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logging.info(f"Using device: {device}")
 
     logging.info("Loading data")
-    # dataloader = DataLoaderFactory(HEIGHT, WIDTH).get("reid", args.data_path, "test")
-    dataloader = DataLoaderFactory(HEIGHT, WIDTH).get(
-        "context_video",
-        args.data_path,
+    dataloader = DataLoaderFactory(cfg.height, cfg.width).get(
+        cfg.test_dataloader,
+        cfg.data_dir,
         "test",
     )
 
     logging.info("Loading network")
-    network = load_network(args.model_path, device)
+    network = load_network(cfg, device)
     with torch.no_grad():
         logging.info("Extracting features")
-        features = extract_features(network, dataloader, device)
+        features = extract_features(network, dataloader, device, cfg.linear_num)
 
     logging.info("Clustering ids")
     max_silhouette = -1.0
@@ -177,10 +157,27 @@ def main(args: Namespace):
 
 if __name__ == "__main__":
     parser = ArgumentParser()
-    parser.add_argument("--model-path", type=Path, required=True)
-    parser.add_argument("--data-path", type=Path, required=True)
-    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument(
+        "-f",
+        type=str,
+        metavar="CONFIG_FILE",
+        default="config.json",
+        help="JSON file for configuration. Using command line arguments overrides values in JSON file.",
+    )
+    parser.add_argument("--model-name", type=str)
+    parser.add_argument("--data-dir", type=str)
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument(
+        "--dataloader",
+        type=str,
+        choices=["reid", "context_video"],
+        help="Dataloader name",
+        dest="test_dataloader",
+    )
 
     args = parser.parse_args()
 
-    main(args)
+    cfg = Config.from_json(args.f)
+    cfg.update(**{k: v for k, v in vars(args).items() if v is not None})
+
+    main(cfg)
